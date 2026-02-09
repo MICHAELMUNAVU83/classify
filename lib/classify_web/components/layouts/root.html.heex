@@ -7,18 +7,40 @@
     <.live_title default="Classify – Product Classification" suffix=" · Classify">
       {assigns[:page_title]}
     </.live_title>
-    <meta name="description" content={assigns[:page_description] || "Upload, clean, and classify product data with AI. Review your data, get GS1 brick codes and target markets, then export to CSV."} />
+    <meta
+      name="description"
+      content={
+        assigns[:page_description] ||
+          "Upload, clean, and classify product data with AI. Review your data, get GS1 brick codes and target markets, then export to CSV."
+      }
+    />
     <meta name="robots" content="index, follow" />
     <meta name="author" content="Classify" />
     <meta name="theme-color" content="#2563eb" />
     <meta property="og:type" content="website" />
     <meta property="og:title" content={assigns[:og_title] || "Classify – Product Classification"} />
-    <meta property="og:description" content={assigns[:og_description] || "Upload, clean, and classify product data with AI. Review and export to CSV."} />
+    <meta
+      property="og:description"
+      content={
+        assigns[:og_description] ||
+          "Upload, clean, and classify product data with AI. Review and export to CSV."
+      }
+    />
     <meta property="og:locale" content="en_US" />
     <meta name="twitter:card" content="summary" />
-    <meta name="twitter:title" content={assigns[:twitter_title] || "Classify – Product Classification"} />
-    <meta name="twitter:description" content={assigns[:twitter_description] || "Upload, clean, and classify product data with AI. Review and export to CSV."} />
+    <meta
+      name="twitter:title"
+      content={assigns[:twitter_title] || "Classify – Product Classification"}
+    />
+    <meta
+      name="twitter:description"
+      content={
+        assigns[:twitter_description] ||
+          "Upload, clean, and classify product data with AI. Review and export to CSV."
+      }
+    />
     <link phx-track-static rel="stylesheet" href={~p"/assets/app.css"} />
+    <link rel="icon" href={~p"/images/logo.png"} />
     <script defer phx-track-static type="text/javascript" src={~p"/assets/app.js"}>
     </script>
   </head>
