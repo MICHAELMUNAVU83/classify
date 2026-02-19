@@ -10,13 +10,33 @@ defmodule Classify.ProductCleaner do
 
   @base_context """
   You are a data cleaner for product records. Given product code, name, and description,
-  extract or infer: weight (numeric, e.g. 300, 1.5), uom (unit: MLT or LTR only),
-  classification (GS1 brick code, 8 digits as string), target_market (country code e.g. KE).
-  For description: combine product name/type with volume and unit in one string, in sentence case (first letter capital, rest lowercase).
-  Format: "Product name [weight][uom]" e.g. "Vesen purified water 300mlt", "Breast cancer initiative purified water 500mlt".
-  Return a JSON array with one object per product in the SAME order as given. Each object must have exactly:
-  description (string, product name + space + volume + unit as above), weight (number or null), uom (string "MLT" or "LTR" or null), classification (string 8 digits or null), target_market (string 2-letter code or null).
-  If you cannot determine a value, use null. Return only the JSON array, no other text.
+  extract or infer: brand name, description, weight, uom, classification, target_market.
+
+  NAME RULES (extract brand name only — not product type):
+  - name must be ONLY the brand/manufacturer name, in title case. Strip any product-type words.
+  - "VESEN PURIFIED WATER" → name = "Vesen"
+  - "BREAST CANCER INITIATIVE PURIFIED WATER" → name = "Breast Cancer Initiative"
+  - "DAIRYFRESH FULL CREAM MILK 1L" → name = "Dairyfresh"
+  - When unsure, keep only the first word(s) that identify the brand; drop generic product words like water, milk, juice, purified, fresh, cream, etc.
+
+  DESCRIPTION RULES:
+  - Full product name + volume + unit in sentence case, e.g. "Vesen purified water 300mlt".
+
+  WEIGHT RULES (critical — do NOT convert between units):
+  - weight is the raw numeric value from the product, matching the uom field.
+  - If the product says "10 LITRES" → weight=10, uom="LTR"
+  - If the product says "18.9 LITRES" → weight=18.9, uom="LTR"
+  - If the product says "500ML" or "500mlt" → weight=500, uom="MLT"
+  - If the product says "300ML" → weight=300, uom="MLT"
+  - NEVER multiply by 1000 or otherwise convert the number. Keep the numeric value exactly as described.
+
+  Classification: you will receive a list of valid brick codes with descriptions. Pick the ONE brick whose description best matches the product type. Use ONLY brick codes from that list; if none fit, use null.
+  TARGET MARKET RULES:
+  - Use ONLY one of: "KE" (Kenya), "UG" (Uganda), "001" (global/worldwide).
+  - Default to "KE" if unknown or cannot be determined.
+
+  Return a JSON array with one object per product in the SAME order as given. Each object: name (brand only, title case), description (string), weight (number or null), uom ("MLT" or "LTR" or null), classification (string 8 digits from the list or null), target_market ("KE", "UG", or "001").
+  Return only the JSON array, no other text.
   """
 
   @doc """
@@ -56,7 +76,7 @@ defmodule Classify.ProductCleaner do
       end)
 
     "Products (one per line):\n" <> Enum.join(lines, "\n") <>
-      "\n\nReturn a JSON array of objects with keys: description (product name + volume + unit e.g. 'Breast Cancer Initiative Purified Water 500mlt'), weight, uom, classification, target_market (same order as above)."
+      "\n\nReturn a JSON array of objects with keys: name (brand only e.g. 'Vesen', 'Breast Cancer Initiative'), description (full product name + volume + unit e.g. 'Vesen purified water 300mlt'), weight, uom, classification, target_market (same order as input)."
   end
 
   defp parse_and_merge(products, content) do
@@ -81,15 +101,24 @@ defmodule Classify.ProductCleaner do
   end
 
   defp merge_ai_into_product(product, ai_row) when is_map(ai_row) do
-    raw = if is_binary(ai_row["description"]) and String.trim(ai_row["description"]) != "", do: String.trim(ai_row["description"]), else: product.description
-    cleaned_desc = sentence_case(raw)
+    raw_desc = if is_binary(ai_row["description"]) and String.trim(ai_row["description"]) != "", do: String.trim(ai_row["description"]), else: product.description
+    cleaned_desc = sentence_case(raw_desc)
+
+    raw_name = ai_row["name"]
+    cleaned_name =
+      if is_binary(raw_name) and String.trim(raw_name) != "" do
+        String.trim(raw_name)
+      else
+        product.name
+      end
 
     product
+    |> Map.put(:name, cleaned_name)
     |> Map.put(:description, cleaned_desc)
     |> Map.put(:weight, pick_number(ai_row["weight"], product.weight))
     |> Map.put(:uom, pick_string(ai_row["uom"], product.uom, ~w(MLT LTR)))
     |> Map.put(:classification, pick_classification(ai_row["classification"], product.classification))
-    |> Map.put(:target_market, pick_string(ai_row["target_market"], product.target_market, nil) || "KE")
+    |> Map.put(:target_market, pick_string(ai_row["target_market"], product.target_market, ~w(KE UG 001)) || "KE")
   end
 
   defp pick_number(nil, fallback), do: fallback
@@ -129,14 +158,36 @@ defmodule Classify.ProductCleaner do
   defp present?(v) when is_binary(v), do: String.trim(v) != ""
   defp present?(_), do: true
 
+  # Avoid storing code as "6164003345002.0" when parsed as float
+  defp normalize_code_for_output(nil), do: ""
+  defp normalize_code_for_output(v) when is_integer(v), do: to_string(v)
+  defp normalize_code_for_output(v) when is_number(v) do
+    if trunc(v) == v, do: to_string(trunc(v)), else: to_string(v)
+  end
+  defp normalize_code_for_output(v) when is_binary(v) do
+    s = String.trim(v)
+    if String.ends_with?(s, ".0") and String.length(s) > 2 do
+      rest = String.slice(s, 0, String.length(s) - 2)
+      if rest =~ ~r/^\d+$/, do: rest, else: s
+    else
+      s
+    end
+  end
+  defp normalize_code_for_output(v), do: to_string(v)
+
   defp to_seven_attributes_only(product) do
     classification = product[:classification] || product["classification"]
     classification_str = if is_binary(classification), do: classification, else: if(is_number(classification), do: to_string(classification), else: nil)
     target = product[:target_market] || product["target_market"]
-    target_str = if present?(target), do: to_string(target), else: "KE"
+    target_str =
+      case to_string(target) |> String.trim() |> String.upcase() do
+        t when t in ["KE", "UG", "001"] -> t
+        _ -> "KE"
+      end
+    code_raw = product[:code] || product["code"] || ""
 
     %{
-      code: to_string(product[:code] || product["code"] || ""),
+      code: normalize_code_for_output(code_raw),
       name: to_string(product[:name] || product["name"] || ""),
       description: to_string(product[:description] || product["description"] || ""),
       weight: product[:weight] || product["weight"],

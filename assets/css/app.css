@@ -2,4 +2,30 @@
 @import "tailwindcss/components";
 @import "tailwindcss/utilities";
 
-/* This file is for your main application CSS */
+/* Smoother, cleaner UI for classifier */
+.input-step3 {
+  @apply text-sm border border-gray-200 rounded-lg px-3 py-2 transition-colors duration-150;
+  @apply focus:border-blue-400 focus:ring-2 focus:ring-blue-100 focus:outline-none;
+}
+.input-step3:hover {
+  @apply border-gray-300;
+}
+.similar-panel {
+  @apply mt-2 rounded-xl border border-gray-200 bg-white shadow-lg overflow-hidden;
+  @apply max-h-52 overflow-y-auto;
+}
+.table-step3 thead th {
+  @apply px-3 py-2.5 text-left text-xs font-medium text-gray-500 uppercase tracking-wider;
+}
+.table-step3 tbody td {
+  @apply px-3 py-2 align-top;
+}
+.dirty-row {
+  @apply bg-gray-50 border-b border-gray-100 text-xs text-gray-600;
+}
+.row-editable {
+  @apply transition-colors duration-100;
+}
+.row-editable:hover {
+  @apply bg-gray-50/50;
+}

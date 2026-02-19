@@ -22,10 +22,27 @@ import {Socket} from "phoenix"
 import {LiveSocket} from "phoenix_live_view"
 import topbar from "../vendor/topbar"
 
+const Hooks = {}
+Hooks.ClickAway = {
+  mounted() {
+    this.index = this.el.dataset.index
+    this.handleClick = (e) => {
+      if (!this.el.contains(e.target)) {
+        this.pushEvent("clear_similar_suggestions", { index: this.index })
+      }
+    }
+    document.addEventListener("click", this.handleClick)
+  },
+  destroyed() {
+    document.removeEventListener("click", this.handleClick)
+  }
+}
+
 let csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 let liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
-  params: {_csrf_token: csrfToken}
+  params: {_csrf_token: csrfToken},
+  hooks: Hooks
 })
 
 // Show progress bar on live navigation and form submits

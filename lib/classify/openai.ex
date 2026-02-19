@@ -8,7 +8,7 @@ defmodule Classify.OpenAI do
       Application.get_env(:classify, :openai_api_key)
 
     model =
-      "gpt-4o-mini"
+      "gpt-4.1"
 
     body = %{
       "model" => model,
@@ -18,9 +18,7 @@ defmodule Classify.OpenAI do
           "content" => context
         },
         %{"role" => "user", "content" => prompt}
-      ],
-      "temperature" => 0.5,
-      "max_tokens" => 4000
+      ]
     }
 
     if !is_binary(api_key) or byte_size(api_key) == 0 do

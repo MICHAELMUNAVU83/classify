@@ -116,7 +116,7 @@ defmodule Classify.FileParser do
     # Only return if we have minimum required fields
     if code && (name || description) do
       %{
-        code: to_string(code),
+        code: normalize_code(code),
         name: to_string(name || ""),
         description: to_string(description || ""),
         weight: parse_number(weight),
@@ -130,6 +130,23 @@ defmodule Classify.FileParser do
   end
 
   defp normalize_product(_), do: nil
+
+  # Store code as string without ".0" (CSV/Excel often parse long numbers as float)
+  defp normalize_code(nil), do: ""
+  defp normalize_code(v) when is_integer(v), do: to_string(v)
+  defp normalize_code(v) when is_number(v) do
+    if trunc(v) == v, do: to_string(trunc(v)), else: to_string(v)
+  end
+  defp normalize_code(v) when is_binary(v) do
+    s = String.trim(v)
+    if String.ends_with?(s, ".0") and String.length(s) > 2 do
+      rest = String.slice(s, 0, String.length(s) - 2)
+      if rest =~ ~r/^\d+$/, do: rest, else: s
+    else
+      s
+    end
+  end
+  defp normalize_code(v), do: to_string(v)
 
   defp get_value(map, keys) when is_list(keys) do
     Enum.find_value(keys, fn key ->
