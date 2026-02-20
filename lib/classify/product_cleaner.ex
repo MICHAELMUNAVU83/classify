@@ -35,7 +35,7 @@ defmodule Classify.ProductCleaner do
   - Use ONLY one of: "KE" (Kenya), "UG" (Uganda), "001" (global/worldwide).
   - Default to "KE" if unknown or cannot be determined.
 
-  Return a JSON array with one object per product in the SAME order as given. Each object: name (brand only, title case), description (string), weight (number or null), uom ("MLT" or "LTR" or null), classification (string 8 digits from the list or null), target_market ("KE", "UG", or "001").
+  Return a JSON array with one object per product in the SAME order as given. Each object: name (brand only, title case), description (string), weight (number or null), uom (one of: MLT, LTR, CTL, GRM, KGM, MTR, CMT, MMT, INH, PK, PA, DZN, PR, ZP, H87, U2, AV, ONZ, LTN, AMP, KWT, WTT, VLT, KVT — or null), classification (string 8 digits from the list or null), target_market ("KE", "UG", or "001").
   Return only the JSON array, no other text.
   """
 
@@ -116,7 +116,7 @@ defmodule Classify.ProductCleaner do
     |> Map.put(:name, cleaned_name)
     |> Map.put(:description, cleaned_desc)
     |> Map.put(:weight, pick_number(ai_row["weight"], product.weight))
-    |> Map.put(:uom, pick_string(ai_row["uom"], product.uom, ~w(MLT LTR)))
+    |> Map.put(:uom, pick_string(ai_row["uom"], product.uom, ~w(MLT LTR CTL GRM KGM MTR CMT MMT INH PK PA DZN PR ZP H87 U2 AV ONZ LTN AMP KWT WTT VLT KVT)))
     |> Map.put(:classification, pick_classification(ai_row["classification"], product.classification))
     |> Map.put(:target_market, pick_string(ai_row["target_market"], product.target_market, ~w(KE UG 001)) || "KE")
   end
