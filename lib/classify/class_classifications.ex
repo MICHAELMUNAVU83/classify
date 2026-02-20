@@ -53101,36 +53101,32 @@ defmodule Classify.Classifications do
     ]
   end
 
-  @doc """
-  Get a classification by brick code.
-  Returns nil if not found.
-
-  ## Examples
-
-      iex> MyApp.Classifications.get_by_brick("10001686")
-      %{brick: "10001686", description: "Airbrushes (Powered)"}
-
-      iex> MyApp.Classifications.get_by_brick("99999999")
-      nil
-  """
-  @spec get_by_brick(String.t()) :: %{brick: String.t(), description: String.t()} | nil
+  @spec get_by_brick(String.t()) :: map() | nil
   def get_by_brick(brick_code) when is_binary(brick_code) do
-    Enum.find(all(), fn classification -> classification.brick == brick_code end)
+    Enum.find(all(), fn c -> c.brick == brick_code end)
   end
 
   @doc """
-  Returns other classifications in the same GS1 class as the given brick (same class_code).
-  Useful for "View Similar" to show truly related options. Excludes the given brick.
+  Returns other classifications in the same GS1 class AND segment as the given brick.
+  Double-guarded so colliding class_codes across unrelated segments can't bleed through.
   """
   @spec same_class_as(String.t(), non_neg_integer()) :: [map()]
   def same_class_as(brick_code, limit \\ 15) when is_binary(brick_code) and limit > 0 do
     case get_by_brick(brick_code) do
-      nil -> []
+      nil ->
+        []
+
       ref ->
         class_code = ref[:class_code] || ref["class_code"]
+        segment_code = ref[:segment_code] || ref["segment_code"]
+
         if class_code do
           all()
-          |> Enum.filter(fn c -> (c[:class_code] || c["class_code"]) == class_code and c.brick != brick_code end)
+          |> Enum.filter(fn c ->
+            c.brick != brick_code and
+              (c[:class_code] || c["class_code"]) == class_code and
+              (is_nil(segment_code) or (c[:segment_code] || c["segment_code"]) == segment_code)
+          end)
           |> Enum.take(limit)
         else
           []
@@ -53138,74 +53134,132 @@ defmodule Classify.Classifications do
     end
   end
 
-  @doc """
-  Search classifications by keyword in description.
-  Case-insensitive search.
-
-  ## Examples
-
-      iex> MyApp.Classifications.search("water")
-      [%{brick: "10000232", description: "Water/Soda Water/Table Water – Unflavoured (Bottled)"}, ...]
-  """
-  @spec search(String.t()) :: [%{brick: String.t(), description: String.t()}]
+  @spec search(String.t()) :: [map()]
   def search(keyword) when is_binary(keyword) do
-    keyword_lower = String.downcase(keyword)
+    kw = String.downcase(keyword)
 
-    all()
-    |> Enum.filter(fn classification ->
-      classification.description
-      |> String.downcase()
-      |> String.contains?(keyword_lower)
+    Enum.filter(all(), fn c ->
+      c.description |> String.downcase() |> String.contains?(kw)
     end)
   end
 
-  @doc """
-  Search by keyword in description OR class_title (for better relevance in prompts).
-  """
+  @spec search_description_or_class(String.t()) :: [map()]
   def search_description_or_class(keyword) when is_binary(keyword) do
-    keyword_lower = String.downcase(keyword)
-    all()
-    |> Enum.filter(fn c ->
+    kw = String.downcase(keyword)
+
+    Enum.filter(all(), fn c ->
       desc = (c[:description] || c["description"] || "") |> String.downcase()
       class_t = (c[:class_title] || c["class_title"] || "") |> String.downcase()
-      String.contains?(desc, keyword_lower) or String.contains?(class_t, keyword_lower)
+      String.contains?(desc, kw) or String.contains?(class_t, kw)
     end)
   end
 
-  @doc """
-  Get all unique brick codes.
-  """
   @spec brick_codes() :: [String.t()]
-  def brick_codes do
-    all() |> Enum.map(& &1.brick)
-  end
+  def brick_codes, do: all() |> Enum.map(& &1.brick)
 
-  @doc """
-  Get all descriptions.
-  """
   @spec descriptions() :: [String.t()]
-  def descriptions do
-    all() |> Enum.map(& &1.description)
-  end
+  def descriptions, do: all() |> Enum.map(& &1.description)
 
-  @doc """
-  Count total classifications.
-  """
   @spec count() :: integer()
   def count, do: length(all())
 
-  @doc """
-  Returns a list of suggested classifications for a single product (for UI "Similar" suggestions).
-  Uses keyword extraction from name/description; fewer stopwords than Classifier so more matches.
-  """
-  @spec suggest_for_product(map(), non_neg_integer()) :: [
-          %{brick: String.t(), description: String.t(), class_title: String.t()}
-        ]
-  def suggest_for_product(product, limit \\ 10) when is_map(product) and limit > 0 do
+  # ---------------------------------------------------------------------------
+  # Scoring — single definition used everywhere
+  # Weights: description=4, class_title=3, family_title=2, segment_title=1
+  # Returns 0 when there is no overlap (caller decides whether to keep or drop)
+  # ---------------------------------------------------------------------------
+  defp score_candidate(c, product_text) do
+    [
+      {c[:description] || c["description"] || "", 4},
+      {c[:class_title] || c["class_title"] || "", 3},
+      {c[:family_title] || c["family_title"] || "", 2},
+      {c[:segment_title] || c["segment_title"] || "", 1}
+    ]
+    |> Enum.reduce(0, fn {field, weight}, acc ->
+      words =
+        field
+        |> String.downcase()
+        |> String.replace(~r/[^\p{L}\p{N}\s]/u, " ")
+        |> String.split(~r/\s+/, trim: true)
+        |> Enum.reject(&(String.length(&1) < 4))
+
+      matches = Enum.count(words, &String.contains?(product_text, &1))
+      acc + matches * weight
+    end)
+  end
+
+  # ---------------------------------------------------------------------------
+  # suggest_for_product — powers the "Similar" button in the UI
+  # ---------------------------------------------------------------------------
+  # Header declaration — defaults live here only
+  def suggest_for_product(product, limit \\ 10)
+
+  def suggest_for_product(product, limit) when is_map(product) and limit > 0 do
+    current_brick = product[:classification] || product["classification"]
+
     text =
       "#{product[:name] || product["name"] || ""} #{product[:description] || product["description"] || ""}"
       |> String.downcase()
       |> String.trim()
+
+    if is_binary(current_brick) and String.match?(current_brick, ~r/^\d{8}$/) do
+      case get_by_brick(current_brick) do
+        nil ->
+          suggest_by_keywords(product, text, limit)
+
+        ref ->
+          class_code = ref[:class_code] || ref["class_code"]
+          family_code = ref[:family_code] || ref["family_code"]
+          segment_code = ref[:segment_code] || ref["segment_code"]
+
+          # Tier 1: same class + same segment (tightest match)
+          same_class =
+            all()
+            |> Enum.filter(fn c ->
+              c.brick != current_brick and
+                (c[:class_code] || c["class_code"]) == class_code and
+                (c[:segment_code] || c["segment_code"]) == segment_code
+            end)
+
+          # Tier 2: same family but different class (broader)
+          same_family =
+            all()
+            |> Enum.filter(fn c ->
+              c.brick != current_brick and
+                (c[:family_code] || c["family_code"]) == family_code and
+                (c[:class_code] || c["class_code"]) != class_code
+            end)
+
+          # Score and merge — class siblings ranked first, family as padding
+          scored_class =
+            same_class
+            # +100 keeps class on top
+            |> Enum.map(fn c -> {c, score_candidate(c, text) + 100} end)
+
+          scored_family =
+            same_family
+            |> Enum.map(fn c -> {c, score_candidate(c, text)} end)
+
+          (scored_class ++ scored_family)
+          |> Enum.sort_by(fn {_c, score} -> score end, :desc)
+          |> Enum.take(limit)
+          |> Enum.map(fn {c, _} -> format_suggestion(c) end)
+      end
+    else
+      suggest_by_keywords(product, text, limit)
+    end
+  end
+
+  def suggest_for_product(_product, _limit), do: []
+
+  defp suggest_by_keywords(product, text, limit) do
+    text =
+      if String.length(text) > 1,
+        do: text,
+        else:
+          "#{product[:name] || product["name"] || ""} #{product[:description] || product["description"] || ""}"
+          |> String.downcase()
+          |> String.trim()
 
     if String.length(text) < 2 do
       []
@@ -53214,66 +53268,110 @@ defmodule Classify.Classifications do
         text
         |> String.replace(~r/[^\p{L}\p{N}\s]/u, " ")
         |> String.split(~r/\s+/, trim: true)
-        |> Enum.reject(&(String.length(&1) < 2))
+        |> Enum.reject(&(String.length(&1) < 3))
         |> Enum.uniq()
         |> Enum.take(15)
 
-      if keywords == [] do
-        []
-      else
-        keywords
-        |> Enum.flat_map(&search/1)
-        |> Enum.uniq_by(& &1.brick)
-        |> Enum.take(limit)
-        |> Enum.map(fn c ->
-          %{
-            brick: c.brick,
-            description: c.description || "",
-            class_title: c[:class_title] || c["class_title"] || "",
-            segment_title: c[:segment_title] || c["segment_title"] || ""
-          }
-        end)
-      end
+      keywords
+      |> Enum.flat_map(&search_description_or_class/1)
+      |> Enum.uniq_by(& &1.brick)
+      |> Enum.map(fn c -> {c, score_candidate(c, text)} end)
+      |> Enum.reject(fn {_c, score} -> score <= 0 end)
+      |> Enum.sort_by(fn {_c, score} -> score end, :desc)
+      |> Enum.take(limit)
+      |> Enum.map(fn {c, _} -> format_suggestion(c) end)
     end
   end
 
-  @doc """
-  Returns a compact list of relevant classifications for the given products (for LLM prompts).
-  Extracts keywords from product names/descriptions, searches classifications, dedupes and limits
-  to avoid blowing token count. Format: one line per classification "brick\\tdescription".
-  """
-  @spec relevant_for([%{name: String.t(), description: String.t()}], non_neg_integer()) ::
-          String.t()
+  defp format_suggestion(c) do
+    %{
+      brick: c.brick,
+      description: c[:description] || c["description"] || "",
+      class_title: c[:class_title] || c["class_title"] || "",
+      segment_title: c[:segment_title] || c["segment_title"] || ""
+    }
+  end
+
+  # ---------------------------------------------------------------------------
+  # relevant_for — builds the compact brick list sent to the LLM
+  # ---------------------------------------------------------------------------
+  @spec relevant_for([map()], non_neg_integer()) :: String.t()
   def relevant_for(products, limit \\ 80) when is_list(products) and limit > 0 do
-    keywords =
+    product_text =
       products
-      |> Enum.flat_map(fn p ->
-        text = "#{p.name || ""} #{p.description || ""}" |> String.downcase()
-        extract_keywords(text)
-      end)
-      |> Enum.uniq()
-      |> Enum.take(20)
+      |> Enum.map_join(" ", fn p -> "#{p.name || ""} #{p.description || ""}" end)
+      |> String.downcase()
+
+    keywords = extract_keywords_for_products(products)
 
     if keywords == [] do
       ""
     else
-      # Match in description or class_title for better relevance (e.g. "pineapple" -> Pineapples class)
       keywords
       |> Enum.flat_map(&search_description_or_class/1)
       |> Enum.uniq_by(& &1.brick)
+      |> Enum.sort_by(&score_candidate(&1, product_text), :desc)
       |> Enum.take(limit)
-      |> Enum.map_join("\n", fn c -> "#{c.brick}\t#{c.description}" end)
+      |> Enum.map_join("\n", fn c ->
+        family = c[:family_title] || c["family_title"] || ""
+        "#{c.brick}\t#{c.description} [#{family}]"
+      end)
     end
   end
 
-  defp extract_keywords(text) do
-    stop =
-      ~w(a an the and or but for of in on at to from by with is are was were be been ml mlt ltr litre liter)
+  # ---------------------------------------------------------------------------
+  # suggest_for_product helper (used by UI "Similar" when no classification)
+  # ---------------------------------------------------------------------------
 
-    text
-    |> String.replace(~r/[^\p{L}\p{N}\s]/u, " ")
-    |> String.split(~r/\s+/, trim: true)
-    |> Enum.reject(&(&1 in stop or String.length(&1) < 3))
+  # ---------------------------------------------------------------------------
+  # Keyword extraction for LLM prompt (type-focused, bigram-aware)
+  # ---------------------------------------------------------------------------
+  @product_type_words ~w(
+    drink beverage juice water milk powder cream oil shampoo soap detergent
+    energy carbonated sparkling still soft fresh dairy yogurt cheese butter
+    tea coffee chocolate flour sugar rice pasta bread cereal biscuit snack
+    sauce vinegar condiment jam honey syrup cooking cleaning lotion
+    sanitiser sanitizer moisturiser moisturizer deodorant toothpaste
+    body wash hand wash shower gel fabric softener bleach disinfectant
+    beer wine spirits whisky vodka gin rum soda cordial squash nectar
+    supplement vitamin mineral protein tablet capsule
+  )
+
+  defp extract_keywords_for_products(products) do
+    products
+    |> Enum.flat_map(fn p ->
+      text = "#{p.name || ""} #{p.description || ""}" |> String.downcase()
+      extract_type_focused_keywords(text)
+    end)
     |> Enum.uniq()
+    |> Enum.take(20)
+  end
+
+  defp extract_type_focused_keywords(text) do
+    stop = ~w(a an the and or but for of in on at to from by with is are was
+              were be been ml mlt ltr litre liter litres millilitre milliliter)
+
+    words =
+      text
+      |> String.replace(~r/[^\p{L}\p{N}\s]/u, " ")
+      |> String.split(~r/\s+/, trim: true)
+      |> Enum.reject(&(&1 in stop or String.length(&1) < 3))
+
+    type_words_found = Enum.filter(words, &(&1 in @product_type_words))
+    has_type_word = type_words_found != []
+
+    bigrams =
+      words
+      |> Enum.chunk_every(2, 1, :discard)
+      |> Enum.map(fn [a, b] -> "#{a} #{b}" end)
+      |> Enum.filter(fn bg ->
+        Enum.any?(String.split(bg), &(&1 in @product_type_words))
+      end)
+
+    if has_type_word do
+      (bigrams ++ type_words_found) |> Enum.uniq()
+    else
+      words
+    end
   end
 end

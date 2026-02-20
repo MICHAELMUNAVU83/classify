@@ -172,58 +172,45 @@ defmodule ClassifyWeb.ClassifierLive.Index do
   end
 
   @impl true
+
   def handle_event("suggest_similar_classes", %{"index" => idx_str}, socket) do
     idx = parse_index(idx_str)
+
     if idx == nil or idx < 0 or idx >= length(socket.assigns.reviewed_products) do
       {:noreply, socket}
     else
       product = Enum.at(socket.assigns.reviewed_products, idx)
-      query = "#{product.name || ""} #{product.description || ""}" |> String.trim()
+
+      suggestions = Classifications.suggest_for_product(product, 10)
+
+      # Always pin current brick at top so user can see what's selected
+      current_brick =
+        (product.classification || product[:classification]) |> to_string() |> String.trim()
+
       suggestions =
-        if String.length(query) >= 2 do
-          from_classifier = Classifier.search_classifications(query, 10)
-          from_classifier =
-            Enum.map(from_classifier, fn c -> %{brick: c.brick || c[:brick], description: c.description || c[:description] || ""} end)
-          list = if from_classifier != [] do
-            from_classifier
-          else
-            Classifications.suggest_for_product(product, 10)
-          end
-          # Always include current and previous classification so user can switch back; dedupe by brick
-          current_brick = (product.classification || product[:classification]) |> to_string() |> String.trim()
-          previous_brick = (Map.get(product, :previous_classification) || Map.get(product, "previous_classification")) |> to_string() |> String.trim()
-          current_item = if current_brick != "" do
+        if current_brick != "" do
+          current_item =
             case Classifications.get_by_brick(current_brick) do
-              nil -> %{brick: current_brick, description: "—"}
-              c -> %{brick: c.brick || c[:brick], description: c.description || c[:description] || ""}
+              nil ->
+                %{brick: current_brick, description: "—", class_title: "", segment_title: ""}
+
+              c ->
+                %{
+                  brick: c.brick,
+                  description: c.description || "",
+                  class_title: c[:class_title] || "",
+                  segment_title: c[:segment_title] || ""
+                }
             end
-          else
-            nil
-          end
-          previous_item = if previous_brick != "" and previous_brick != current_brick do
-            case Classifications.get_by_brick(previous_brick) do
-              nil -> %{brick: previous_brick, description: "—"}
-              c -> %{brick: c.brick || c[:brick], description: c.description || c[:description] || ""}
-            end
-          else
-            nil
-          end
-          # Order: current first, then previous (if any), then rest; uniq by brick
-          with_previous = if previous_item do
-            [previous_item | list] |> Enum.uniq_by(& &1.brick)
-          else
-            list
-          end
-          with_both = if current_item do
-            [current_item | with_previous] |> Enum.uniq_by(& &1.brick)
-          else
-            with_previous
-          end
-          with_both
+
+          [current_item | Enum.reject(suggestions, &(&1.brick == current_brick))]
         else
-          []
+          suggestions
         end
-      suggestions_map = Map.put(socket.assigns.classification_suggestions || %{}, idx, suggestions)
+
+      suggestions_map =
+        Map.put(socket.assigns.classification_suggestions || %{}, idx, suggestions)
+
       {:noreply, assign(socket, :classification_suggestions, suggestions_map)}
     end
   end
@@ -231,24 +218,33 @@ defmodule ClassifyWeb.ClassifierLive.Index do
   @impl true
   def handle_event("clear_similar_suggestions", %{"index" => idx_str}, socket) do
     idx = parse_index(idx_str)
-    suggestions_map = if idx != nil, do: Map.delete(socket.assigns.classification_suggestions || %{}, idx), else: (socket.assigns.classification_suggestions || %{})
+
+    suggestions_map =
+      if idx != nil,
+        do: Map.delete(socket.assigns.classification_suggestions || %{}, idx),
+        else: socket.assigns.classification_suggestions || %{}
+
     {:noreply, assign(socket, :classification_suggestions, suggestions_map)}
   end
 
   @impl true
   def handle_event("apply_suggestion", %{"index" => idx_str, "brick" => brick}, socket) do
     idx = parse_index(idx_str)
+
     if idx == nil or idx < 0 or idx >= length(socket.assigns.reviewed_products) or brick == "" do
       {:noreply, socket}
     else
       updated =
         List.update_at(socket.assigns.reviewed_products, idx, fn p ->
           prev = p.classification || p[:classification]
+
           p
           |> Map.put(:classification, String.trim(brick))
           |> Map.put(:previous_classification, prev)
         end)
+
       suggestions_map = Map.delete(socket.assigns.classification_suggestions || %{}, idx)
+
       {:noreply,
        socket
        |> assign(:reviewed_products, updated)
@@ -278,7 +274,10 @@ defmodule ClassifyWeb.ClassifierLive.Index do
          socket
          |> assign(:reviewed_products, updated)
          |> assign(:cleaned_products, updated)
-         |> assign(:classification_descriptions, classification_descriptions_from_products(updated))
+         |> assign(
+           :classification_descriptions,
+           classification_descriptions_from_products(updated)
+         )
          |> assign(:duplicate_indices, duplicate_indices(updated))
          |> assign(:invalid_gtin_indices, invalid_gtin_indices(updated))}
 
@@ -292,12 +291,15 @@ defmodule ClassifyWeb.ClassifierLive.Index do
     # Skip LiveView/internal keys
     payload =
       params
-      |> Enum.reject(fn {k, _} -> k in ["event", "type"] or String.starts_with?(to_string(k), "_") end)
+      |> Enum.reject(fn {k, _} ->
+        k in ["event", "type"] or String.starts_with?(to_string(k), "_")
+      end)
       |> Enum.into(%{})
 
     # Prefer explicit index and field (e.g. from phx-value-*)
     index_raw = payload["index"]
     field_name = payload["field"]
+
     if index_raw != nil and field_name != nil do
       key = String.to_existing_atom(field_name)
       value = payload[field_name] || flatten_value(payload["value"])
@@ -310,6 +312,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
         {name, value} when is_binary(name) ->
           if String.contains?(name, ":") do
             parts = String.split(name, ":", parts: 2)
+
             if length(parts) == 2 do
               [idx_str, field_str] = parts
               index = parse_index(idx_str)
@@ -322,10 +325,13 @@ defmodule ClassifyWeb.ClassifierLive.Index do
           nil
       end)
       |> case do
-        {index, key, value} -> {index, key, value}
+        {index, key, value} ->
+          {index, key, value}
+
         _ ->
           # Nested value: params["value"] => %{"1:description" => "..."} or %{"value" => "..."}
           inner = payload["value"]
+
           if is_map(inner) do
             Enum.find_value(inner, fn
               {k, v} when is_binary(k) ->
@@ -340,7 +346,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                 nil
             end)
           end
-        end
+      end
     end
   end
 
@@ -392,7 +398,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
         <h1 class="text-3xl font-bold text-gray-900">Product Classification System</h1>
         <p class="mt-2 text-gray-600">Upload, clean, classify, and export your product data</p>
       </div>
-
+      
     <!-- Progress Steps -->
       <div class="mb-8">
         <nav aria-label="Progress">
@@ -433,7 +439,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
           {@error}
         </div>
       <% end %>
-
+      
     <!-- Step Content -->
       <div class="bg-white shadow rounded-lg p-6">
         <%= case @step do %>
@@ -551,14 +557,15 @@ defmodule ClassifyWeb.ClassifierLive.Index do
               </div>
             </div>
           <% :analysed -> %>
-            <%
-              total_rows = length(@reviewed_products)
-              error_count = count_reviewed_errors(@duplicate_indices, @invalid_gtin_indices || MapSet.new())
-              no_class_count = count_no_classification(@reviewed_products)
-              valid_count = total_rows - error_count
-            %>
+            <% total_rows = length(@reviewed_products)
+
+            error_count =
+              count_reviewed_errors(@duplicate_indices, @invalid_gtin_indices || MapSet.new())
+
+            no_class_count = count_no_classification(@reviewed_products)
+            valid_count = total_rows - error_count %>
             <div class="space-y-5">
-              <%# ── Stat cards ── %>
+              
               <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div class="bg-white rounded-xl border border-gray-200 px-4 py-3">
                   <p class="text-2xl font-semibold text-gray-900">{total_rows}</p>
@@ -569,23 +576,27 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                   <p class="text-xs text-gray-400 mt-0.5 uppercase tracking-wide">Valid</p>
                 </div>
                 <div class={"rounded-xl border px-4 py-3 " <> if(error_count > 0, do: "bg-red-50 border-red-200", else: "bg-white border-gray-200")}>
-                  <p class={"text-2xl font-semibold " <> if(error_count > 0, do: "text-red-600", else: "text-gray-900")}>{error_count}</p>
+                  <p class={"text-2xl font-semibold " <> if(error_count > 0, do: "text-red-600", else: "text-gray-900")}>
+                    {error_count}
+                  </p>
                   <p class="text-xs text-gray-400 mt-0.5 uppercase tracking-wide">Errors</p>
                 </div>
                 <div class={"rounded-xl border px-4 py-3 " <> if(no_class_count > 0, do: "bg-amber-50 border-amber-200", else: "bg-white border-gray-200")}>
-                  <p class={"text-2xl font-semibold " <> if(no_class_count > 0, do: "text-amber-600", else: "text-gray-900")}>{no_class_count}</p>
+                  <p class={"text-2xl font-semibold " <> if(no_class_count > 0, do: "text-amber-600", else: "text-gray-900")}>
+                    {no_class_count}
+                  </p>
                   <p class="text-xs text-gray-400 mt-0.5 uppercase tracking-wide">No class.</p>
                 </div>
               </div>
 
-              <%# ── Main table card ── %>
               <div class="bg-white rounded-xl border border-gray-200 overflow-hidden">
                 <div class="px-5 py-3.5 border-b border-gray-100 flex items-center justify-between">
                   <div>
                     <h3 class="text-sm font-semibold text-gray-800">AI Reviewed — Editable</h3>
                     <p class="text-xs text-gray-400 mt-0.5">
                       Grey rows = original data. Edit any field and click away to save.
-                      <span class="text-red-500">Red rows</span> = duplicate codes or invalid EAN-13 GTIN.
+                      <span class="text-red-500">Red rows</span>
+                      = duplicate codes or invalid EAN-13 GTIN.
                     </p>
                   </div>
                 </div>
@@ -594,13 +605,27 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                   <table class="min-w-full">
                     <thead>
                       <tr class="border-b border-gray-200 bg-gray-50">
-                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Code</th>
-                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Name</th>
-                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Description</th>
-                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Weight</th>
-                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">UOM</th>
-                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Class.</th>
-                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">Market</th>
+                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                          Code
+                        </th>
+                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                          Name
+                        </th>
+                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                          Description
+                        </th>
+                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                          Weight
+                        </th>
+                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                          UOM
+                        </th>
+                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                          Class.
+                        </th>
+                        <th class="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                          Market
+                        </th>
                         <th class="px-3 py-3 w-16"></th>
                       </tr>
                     </thead>
@@ -608,30 +633,48 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                       <%= for {p, idx} <- Enum.with_index(@reviewed_products) do %>
                         <% orig = Map.get(p, :original) %>
                         <% is_dup = MapSet.member?(@duplicate_indices, idx) %>
-                        <% is_invalid_gtin = MapSet.member?(@invalid_gtin_indices || MapSet.new(), idx) %>
+                        <% is_invalid_gtin =
+                          MapSet.member?(@invalid_gtin_indices || MapSet.new(), idx) %>
                         <% has_error = is_dup or is_invalid_gtin %>
-                        <%# ── Original (dirty) read-only row ── %>
                         <%= if orig do %>
                           <tr class={"bg-gray-50 " <> if(has_error, do: "border-l-4 border-red-300", else: "border-l-4 border-transparent")}>
-                            <td class="px-3 py-1.5 text-xs text-gray-500 font-mono">{format_cell(orig[:code])}</td>
-                            <td class="px-3 py-1.5 text-xs text-gray-500">{format_cell(orig[:name])}</td>
-                            <td class="px-3 py-1.5 text-xs text-gray-500 max-w-[18rem] truncate" title={format_cell(orig[:description])}>{format_cell(orig[:description])}</td>
-                            <td class="px-3 py-1.5 text-xs text-gray-500">{format_cell(orig[:weight])}</td>
-                            <td class="px-3 py-1.5 text-xs text-gray-500">{format_cell(orig[:uom])}</td>
-                            <td class="px-3 py-1.5 text-xs text-gray-500 font-mono">{format_cell(orig[:classification])}</td>
-                            <td class="px-3 py-1.5 text-xs text-gray-500">{format_cell(orig[:target_market])}</td>
+                            <td class="px-3 py-1.5 text-xs text-gray-500 font-mono">
+                              {format_cell(orig[:code])}
+                            </td>
+                            <td class="px-3 py-1.5 text-xs text-gray-500">
+                              {format_cell(orig[:name])}
+                            </td>
+                            <td
+                              class="px-3 py-1.5 text-xs text-gray-500 max-w-[18rem] truncate"
+                              title={format_cell(orig[:description])}
+                            >
+                              {format_cell(orig[:description])}
+                            </td>
+                            <td class="px-3 py-1.5 text-xs text-gray-500">
+                              {format_cell(orig[:weight])}
+                            </td>
+                            <td class="px-3 py-1.5 text-xs text-gray-500">
+                              {format_cell(orig[:uom])}
+                            </td>
+                            <td class="px-3 py-1.5 text-xs text-gray-500 font-mono">
+                              {format_cell(orig[:classification])}
+                            </td>
+                            <td class="px-3 py-1.5 text-xs text-gray-500">
+                              {format_cell(orig[:target_market])}
+                            </td>
                             <td class="px-3 py-1.5"></td>
                           </tr>
                         <% end %>
-                        <%# ── Editable row ── %>
                         <tr
                           class={"border-b border-gray-100 " <> if(has_error, do: "bg-red-50 border-l-4 border-red-400", else: "bg-white border-l-4 border-transparent")}
-                          title={cond do
-                            is_dup and is_invalid_gtin -> "Duplicate code; not valid EAN-13 (GTIN)"
-                            is_dup -> "Duplicate product code"
-                            is_invalid_gtin -> "Not valid EAN-13 (GTIN)"
-                            true -> nil
-                          end}
+                          title={
+                            cond do
+                              is_dup and is_invalid_gtin -> "Duplicate code; not valid EAN-13 (GTIN)"
+                              is_dup -> "Duplicate product code"
+                              is_invalid_gtin -> "Not valid EAN-13 (GTIN)"
+                              true -> nil
+                            end
+                          }
                         >
                           <td class="px-2 py-1.5">
                             <input
@@ -707,9 +750,12 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                                 Similar
                               </button>
                             </div>
-                            <% desc = Map.get(@classification_descriptions, format_cell(p.classification)) %>
+                            <% desc =
+                              Map.get(@classification_descriptions, format_cell(p.classification)) %>
                             <%= if is_binary(desc) && desc != "" do %>
-                              <p class="mt-1 text-xs text-blue-500 italic max-w-[14rem] leading-snug">{desc}</p>
+                              <p class="mt-1 text-xs text-blue-500 italic max-w-[14rem] leading-snug">
+                                {desc}
+                              </p>
                             <% end %>
                             <% row_suggestions = Map.get(@classification_suggestions || %{}, idx) %>
                             <%= if row_suggestions != nil do %>
@@ -719,7 +765,9 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                                 phx-hook="ClickAway"
                                 data-index={idx}
                               >
-                                <p class="text-xs font-semibold text-gray-500 mb-1.5 uppercase tracking-wide">Choose a class</p>
+                                <p class="text-xs font-semibold text-gray-500 mb-1.5 uppercase tracking-wide">
+                                  Choose a class
+                                </p>
                                 <%= if row_suggestions == [] do %>
                                   <p class="text-xs text-gray-400">No similar classes found.</p>
                                 <% else %>
@@ -770,13 +818,14 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                             </button>
                           </td>
                         </tr>
-                        <%# ── Row divider ── %>
                         <tr>
                           <td colspan="8" class="p-0">
                             <div class="h-px bg-gray-200 mx-3"></div>
                           </td>
                         </tr>
-                        <tr><td colspan="8" class="h-3 bg-gray-50/60"></td></tr>
+                        <tr>
+                          <td colspan="8" class="h-3 bg-gray-50/60"></td>
+                        </tr>
                         <tr>
                           <td colspan="8" class="p-0">
                             <div class="h-px bg-gray-200 mx-3"></div>
@@ -788,7 +837,9 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                 </div>
 
                 <div class="px-5 py-3 border-t border-gray-100 flex items-center justify-between bg-gray-50 rounded-b-xl">
-                  <p class="text-xs text-gray-400">{length(@reviewed_products)} rows — edit any cell and blur to save</p>
+                  <p class="text-xs text-gray-400">
+                    {length(@reviewed_products)} rows — edit any cell and blur to save
+                  </p>
                   <div class="flex gap-2">
                     <button
                       phx-click="reset"
@@ -928,14 +979,17 @@ defmodule ClassifyWeb.ClassifierLive.Index do
   defp format_cell(nil), do: ""
   defp format_cell(""), do: ""
   defp format_cell(v) when is_binary(v), do: strip_float_suffix(v)
+
   defp format_cell(v) when is_number(v) do
     if is_integer(v) or trunc(v) == v, do: to_string(trunc(v)), else: to_string(v)
   end
+
   defp format_cell(v), do: to_string(v) |> strip_float_suffix()
 
   # Avoid displaying "6164003345002.0" for codes/IDs that were parsed as float
   defp strip_float_suffix(s) when is_binary(s) do
     s = String.trim(s)
+
     if String.ends_with?(s, ".0") and String.length(s) > 2 do
       rest = String.slice(s, 0, String.length(s) - 2)
       if rest =~ ~r/^\d+$/, do: rest, else: s
@@ -943,6 +997,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
       s
     end
   end
+
   defp strip_float_suffix(_), do: ""
 
   defp sentence_case(nil), do: ""
@@ -992,18 +1047,24 @@ defmodule ClassifyWeb.ClassifierLive.Index do
   # EAN-13 / GTIN-13: 13 digits, last digit is check digit
   defp valid_ean13?(nil), do: false
   defp valid_ean13?(""), do: false
+
   defp valid_ean13?(code) when is_binary(code) do
     digits = String.replace(code, ~r/\D/, "")
+
     if String.length(digits) != 13 do
       false
     else
       list = String.graphemes(digits) |> Enum.map(&String.to_integer/1)
       weights = [1, 3, 1, 3, 1, 3, 1, 3, 1, 3, 1, 3]
-      sum = Enum.zip(Enum.take(list, 12), weights) |> Enum.map(fn {d, w} -> d * w end) |> Enum.sum()
+
+      sum =
+        Enum.zip(Enum.take(list, 12), weights) |> Enum.map(fn {d, w} -> d * w end) |> Enum.sum()
+
       check = rem(10 - rem(sum, 10), 10)
       Enum.at(list, 12) == check
     end
   end
+
   defp valid_ean13?(_), do: false
 
   defp invalid_gtin_indices(products) do
