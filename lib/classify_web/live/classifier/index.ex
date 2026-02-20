@@ -13,6 +13,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
      socket
      |> assign(:step, :upload)
      |> assign(:uploaded_file, nil)
+     |> assign(:original_filename, nil)
      |> assign(:products, [])
      |> assign(:cleaned_products, [])
      |> assign(:reviewed_products, [])
@@ -43,11 +44,11 @@ defmodule ClassifyWeb.ClassifierLive.Index do
       consume_uploaded_entries(socket, :product_csv, fn %{path: path}, entry ->
         dest = Path.join(System.tmp_dir!(), "#{entry.uuid}-#{entry.client_name}")
         File.cp!(path, dest)
-        {:ok, dest}
+        {:ok, {dest, entry.client_name}}
       end)
 
     case uploaded_files do
-      [file_path] ->
+      [{file_path, client_name}] ->
         case parse_file(file_path) do
           {:ok, products} ->
             {:noreply,
@@ -55,6 +56,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
              |> assign(:step, :review)
              |> assign(:products, products)
              |> assign(:uploaded_file, file_path)
+             |> assign(:original_filename, client_name)
              |> assign(:error, nil)}
 
           {:error, reason} ->
@@ -147,10 +149,14 @@ defmodule ClassifyWeb.ClassifierLive.Index do
     products = socket.assigns.reviewed_products
     csv_content = build_csv(products)
 
+    original = socket.assigns[:original_filename] || "products"
+    base = Path.basename(original, Path.extname(original))
+    export_filename = "#{base}_cleaned.csv"
+
     {:noreply,
      push_event(socket, "trigger_download", %{
        content: Base.encode64(csv_content),
-       filename: "products.csv",
+       filename: export_filename,
        content_type: "text/csv"
      })}
   end
@@ -161,6 +167,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
      socket
      |> assign(:step, :upload)
      |> assign(:uploaded_file, nil)
+     |> assign(:original_filename, nil)
      |> assign(:products, [])
      |> assign(:cleaned_products, [])
      |> assign(:reviewed_products, [])
@@ -975,12 +982,13 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                         <tr
                           style={"" <> if(has_error, do: "background:#FFF5F5; border-left:3px solid var(--gs1-red);", else: "background:#fff; border-left:3px solid transparent;")}
                           title={
-                            cond do
-                              is_dup and is_invalid_gtin -> "Duplicate code; not valid EAN-13 (GTIN)"
-                              is_dup -> "Duplicate product code"
-                              is_invalid_gtin -> "Not valid EAN-13 (GTIN)"
-                              true -> nil
-                            end
+                            [
+                              (if is_dup, do: "Duplicate barcode — double allocation", else: nil),
+                              (if is_invalid_gtin, do: "Invalid EAN-13 GTIN", else: nil)
+                            ]
+                            |> Enum.reject(&is_nil/1)
+                            |> Enum.join(" · ")
+                            |> then(fn s -> if s == "", do: nil, else: s end)
                           }
                         >
                           <%!-- Code --%>
@@ -1590,8 +1598,11 @@ defmodule ClassifyWeb.ClassifierLive.Index do
     end)
   end
 
-  defp count_reviewed_errors(dup_set, gtin_set) do
-    MapSet.union(dup_set, gtin_set) |> MapSet.size()
+  defp count_reviewed_errors(dup_set, gtin_set, desc_dup_set \\ MapSet.new()) do
+    dup_set
+    |> MapSet.union(gtin_set)
+    |> MapSet.union(desc_dup_set)
+    |> MapSet.size()
   end
 
   defp count_classified(products) do
