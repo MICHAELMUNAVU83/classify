@@ -21,6 +21,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
      |> assign(:classification_suggestions, %{})
      |> assign(:duplicate_indices, MapSet.new())
      |> assign(:invalid_gtin_indices, MapSet.new())
+     |> assign(:gtin_errors, %{})
      |> assign(:processing, false)
      |> assign(:analysis_progress, nil)
      |> assign(:error, nil)
@@ -137,7 +138,8 @@ defmodule ClassifyWeb.ClassifierLive.Index do
      |> assign(:cleaned_products, reviewed)
      |> assign(:classification_descriptions, classification_descriptions_from_products(reviewed))
      |> assign(:duplicate_indices, duplicate_indices(reviewed))
-     |> assign(:invalid_gtin_indices, invalid_gtin_indices(reviewed))}
+     |> assign(:invalid_gtin_indices, invalid_gtin_indices(reviewed))
+     |> assign(:gtin_errors, gtin_errors_map(reviewed))}
   end
 
   @impl true
@@ -167,6 +169,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
      |> assign(:classification_suggestions, %{})
      |> assign(:duplicate_indices, MapSet.new())
      |> assign(:invalid_gtin_indices, MapSet.new())
+     |> assign(:gtin_errors, %{})
      |> assign(:analysis_progress, nil)
      |> assign(:error, nil)}
   end
@@ -252,8 +255,9 @@ defmodule ClassifyWeb.ClassifierLive.Index do
        |> assign(:classification_descriptions, classification_descriptions_from_products(updated))
        |> assign(:classification_suggestions, suggestions_map)
        |> assign(:duplicate_indices, duplicate_indices(updated))
-       |> assign(:invalid_gtin_indices, invalid_gtin_indices(updated))}
-    end
+       |> assign(:invalid_gtin_indices, invalid_gtin_indices(updated))
+       |> assign(:gtin_errors, gtin_errors_map(updated))}
+  end
   end
 
   @impl true
@@ -279,7 +283,8 @@ defmodule ClassifyWeb.ClassifierLive.Index do
            classification_descriptions_from_products(updated)
          )
          |> assign(:duplicate_indices, duplicate_indices(updated))
-         |> assign(:invalid_gtin_indices, invalid_gtin_indices(updated))}
+         |> assign(:invalid_gtin_indices, invalid_gtin_indices(updated))
+         |> assign(:gtin_errors, gtin_errors_map(updated))}
 
       nil ->
         # Unknown payload shape (e.g. value => %{"value" => _} with no index:field)
@@ -386,6 +391,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
      |> assign(:classification_descriptions, classification_descriptions_from_products(reviewed))
      |> assign(:duplicate_indices, duplicate_indices(reviewed))
      |> assign(:invalid_gtin_indices, invalid_gtin_indices(reviewed))
+     |> assign(:gtin_errors, gtin_errors_map(reviewed))
      |> assign(:processing, false)
      |> assign(:analysis_progress, nil)}
   end
@@ -471,17 +477,16 @@ defmodule ClassifyWeb.ClassifierLive.Index do
         <%!-- ── Header ─────────────────────────────────────────────────── --%>
         <div style="display:flex; align-items:center; gap:1rem; margin-bottom:2rem;">
           <%!-- GS1 barcode-stripe logo mark --%>
-          <div style="display:flex; align-items:flex-end; gap:2px; height:36px; flex-shrink:0;">
-            <%= for w <- [3,5,2,6,2,4,3,7,2,5,3] do %>
-              <div style={"width:#{w}px; height:#{100 - :rand.uniform(30)}%; background:var(--gs1-blue); border-radius:1px;"}>
-              </div>
-            <% end %>
-          </div>
+
           <div>
-            <h1 style="font-size:1.2rem; font-weight:700; color:var(--gs1-blue); letter-spacing:-.02em; margin:0;">
-              GS1 Product Classifier
-            </h1>
-            <p style="font-size:.75rem; color:var(--gs1-gray-400); margin:0;">
+            <div class="flex gap-2 items-center">
+              <img src="/images/gs1.png" class="h-12  object-cover" />
+
+              <h1 style="font-size:1.2rem; font-weight:700; color:var(--gs1-blue); letter-spacing:-.02em; margin:0;">
+                GS1 Kenya Product Classifier
+              </h1>
+            </div>
+            <p class="mt-4" style="font-size:.75rem; color:var(--gs1-gray-400); margin:0; margin-top: 20px">
               Upload · Review · Classify · Export
             </p>
           </div>
@@ -950,7 +955,8 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                       <%= for {p, idx} <- Enum.with_index(@reviewed_products) do %>
                         <% orig = Map.get(p, :original)
                         is_dup = MapSet.member?(@duplicate_indices, idx)
-                        is_invalid_gtin = MapSet.member?(@invalid_gtin_indices || MapSet.new(), idx)
+                        gtin_error = Map.get(@gtin_errors || %{}, idx)
+                        is_invalid_gtin = gtin_error != nil
                         has_error = is_dup or is_invalid_gtin %>
 
                         <%!-- Original row --%>
@@ -978,7 +984,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                           }
                         >
                           <%!-- Code --%>
-                          <td style="padding:.4rem .6rem;">
+                          <td style="padding:.4rem .6rem; vertical-align:top;">
                             <input
                               type="text"
                               name={"#{idx}:code"}
@@ -990,6 +996,12 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                               style={"width:7rem; font-size:.75rem; font-family:monospace; border-radius:6px; padding:.35rem .5rem; border:1px solid; " <>
                                 if(has_error, do: "border-color:#FFAAAA; background:#FFF5F5;", else: "border-color:var(--gs1-gray-200);")}
                             />
+                            <%= if is_dup do %>
+                              <p style="margin:.25rem 0 0; font-size:.65rem; color:var(--gs1-red); line-height:1.3;">Duplicate code</p>
+                            <% end %>
+                            <%= if gtin_error do %>
+                              <p style="margin:.25rem 0 0; font-size:.65rem; color:var(--gs1-red); line-height:1.3;">{gtin_error}</p>
+                            <% end %>
                           </td>
                           <%!-- Name --%>
                           <td style="padding:.4rem .6rem;">
@@ -1434,39 +1446,59 @@ defmodule ClassifyWeb.ClassifierLive.Index do
     MapSet.new(duplicate_indices)
   end
 
-  # EAN-13 / GTIN-13: 13 digits, last digit is check digit
-  defp valid_ean13?(nil), do: false
-  defp valid_ean13?(""), do: false
+  # Returns a specific error reason string, or nil if the code is a valid EAN-13
+  defp gtin_error_reason(nil), do: "Code is empty"
+  defp gtin_error_reason(""), do: "Code is empty"
 
-  defp valid_ean13?(code) when is_binary(code) do
-    digits = String.replace(code, ~r/\D/, "")
+  defp gtin_error_reason(code) when is_binary(code) do
+    raw = String.trim(code)
 
-    if String.length(digits) != 13 do
-      false
-    else
-      list = String.graphemes(digits) |> Enum.map(&String.to_integer/1)
-      weights = [1, 3, 1, 3, 1, 3, 1, 3, 1, 3, 1, 3]
+    cond do
+      raw == "" ->
+        "Code is empty"
 
-      sum =
-        Enum.zip(Enum.take(list, 12), weights) |> Enum.map(fn {d, w} -> d * w end) |> Enum.sum()
+      String.match?(raw, ~r/[^\d]/) ->
+        "Contains non-numeric characters"
 
-      check = rem(10 - rem(sum, 10), 10)
-      Enum.at(list, 12) == check
+      String.length(raw) < 13 ->
+        "Too short — #{String.length(raw)} digit#{if String.length(raw) == 1, do: "", else: "s"}, need 13"
+
+      String.length(raw) > 13 ->
+        "Too long — #{String.length(raw)} digits, need 13"
+
+      true ->
+        list = String.graphemes(raw) |> Enum.map(&String.to_integer/1)
+        weights = [1, 3, 1, 3, 1, 3, 1, 3, 1, 3, 1, 3]
+        sum = Enum.zip(Enum.take(list, 12), weights) |> Enum.map(fn {d, w} -> d * w end) |> Enum.sum()
+        expected_check = rem(10 - rem(sum, 10), 10)
+        actual_check = Enum.at(list, 12)
+
+        if actual_check == expected_check do
+          nil
+        else
+          "Wrong check digit (got #{actual_check}, expected #{expected_check})"
+        end
     end
   end
 
-  defp valid_ean13?(_), do: false
+  defp gtin_error_reason(_), do: "Invalid code format"
 
-  defp invalid_gtin_indices(products) do
+  # Returns a map of %{index => reason_string} for all invalid GTINs
+  defp gtin_errors_map(products) do
     products
     |> Enum.with_index()
-    |> Enum.reject(fn {p, _idx} ->
-      raw = p[:code] || p["code"]
-      code = raw |> to_string() |> String.trim()
-      valid_ean13?(code)
+    |> Enum.reduce(%{}, fn {p, idx}, acc ->
+      code = (p[:code] || p["code"]) |> to_string() |> String.trim()
+      case gtin_error_reason(code) do
+        nil -> acc
+        reason -> Map.put(acc, idx, reason)
+      end
     end)
-    |> Enum.map(fn {_, idx} -> idx end)
-    |> MapSet.new()
+  end
+
+  # Keep a plain MapSet of invalid indices for backward-compat with count helpers
+  defp invalid_gtin_indices(products) do
+    gtin_errors_map(products) |> Map.keys() |> MapSet.new()
   end
 
   defp parse_reviewed_value(:weight, ""), do: nil
