@@ -23,6 +23,15 @@ import {LiveSocket} from "phoenix_live_view"
 import topbar from "../vendor/topbar"
 
 const Hooks = {}
+
+Hooks.ScrollBottom = {
+  mounted() { this.scrollToBottom() },
+  updated() { this.scrollToBottom() },
+  scrollToBottom() {
+    this.el.scrollTop = this.el.scrollHeight
+  }
+}
+
 Hooks.ClickAway = {
   mounted() {
     this.index = this.el.dataset.index

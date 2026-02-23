@@ -4,6 +4,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
   alias Classify.Classifications
   alias Classify.FileParser
   alias Classify.ProductCleaner
+  alias Classify.ProductChatbot
 
   @batch_size 15
 
@@ -26,6 +27,17 @@ defmodule ClassifyWeb.ClassifierLive.Index do
      |> assign(:processing, false)
      |> assign(:analysis_progress, nil)
      |> assign(:error, nil)
+     |> assign(:browse_open, false)
+     |> assign(:browse_index, nil)
+     |> assign(:browse_search, "")
+     |> assign(:browse_results, [])
+     |> assign(:chat_messages, [])
+     |> assign(:chat_input, "")
+     |> assign(:chat_processing, false)
+     |> assign(:chat_open, false)
+     |> assign(:raw_headers, [])
+     |> assign(:raw_rows, [])
+     |> assign(:column_mapping, %{})
      |> allow_upload(:product_csv,
        accept: ~w(.csv .xlsx),
        max_entries: 1,
@@ -49,12 +61,16 @@ defmodule ClassifyWeb.ClassifierLive.Index do
 
     case uploaded_files do
       [{file_path, client_name}] ->
-        case parse_file(file_path) do
-          {:ok, products} ->
+        case FileParser.parse_file_raw(file_path) do
+          {:ok, headers, raw_rows} ->
+            mapping = FileParser.guess_column_mapping(headers)
+
             {:noreply,
              socket
-             |> assign(:step, :review)
-             |> assign(:products, products)
+             |> assign(:step, :mapping)
+             |> assign(:raw_headers, headers)
+             |> assign(:raw_rows, raw_rows)
+             |> assign(:column_mapping, mapping)
              |> assign(:uploaded_file, file_path)
              |> assign(:original_filename, client_name)
              |> assign(:error, nil)}
@@ -69,24 +85,75 @@ defmodule ClassifyWeb.ClassifierLive.Index do
   end
 
   @impl true
+  def handle_event("update_mapping", %{"field" => field, "column" => col}, socket) do
+    key = String.to_existing_atom(field)
+    updated = Map.put(socket.assigns.column_mapping, key, if(col == "", do: nil, else: col))
+    {:noreply, assign(socket, :column_mapping, updated)}
+  end
+
+  @impl true
+  def handle_event("back_to_mapping", _params, socket) do
+    {:noreply, assign(socket, :step, :mapping)}
+  end
+
+  @impl true
+  def handle_event("confirm_mapping", _params, socket) do
+    products =
+      FileParser.apply_column_mapping(socket.assigns.raw_rows, socket.assigns.column_mapping)
+
+    if products == [] do
+      {:noreply,
+       assign(
+         socket,
+         :error,
+         "No valid products found with the current mapping. Please check your column assignments."
+       )}
+    else
+      {:noreply,
+       socket
+       |> assign(:step, :review)
+       |> assign(:products, products)
+       |> assign(:error, nil)}
+    end
+  end
+
+  @impl true
   def handle_event("analyse_with_openai", _params, socket) do
     socket =
       socket
       |> assign(:processing, true)
-      |> assign(:analysis_progress, "Preparing…")
+      |> assign(:analysis_progress, %{
+        batch: 0,
+        total_batches: 0,
+        processed: 0,
+        total: 0,
+        status: :running
+      })
 
     pid = self()
     products = socket.assigns.products
     batch_size = @batch_size
     batches = Enum.chunk_every(products, batch_size)
-    total = length(batches)
+    total_batches = length(batches)
+    total_products = length(products)
 
     Task.start(fn ->
       all_reviewed =
         batches
         |> Enum.with_index(1)
         |> Enum.flat_map(fn {batch, idx} ->
-          send(pid, {:analysis_progress, idx, total})
+          send(
+            pid,
+            {:analysis_progress,
+             %{
+               batch: idx,
+               total_batches: total_batches,
+               processed: min((idx - 1) * batch_size + length(batch), total_products),
+               total: total_products,
+               status: :running
+             }}
+          )
+
           ProductCleaner.analyse_batch(batch)
         end)
 
@@ -178,7 +245,147 @@ defmodule ClassifyWeb.ClassifierLive.Index do
      |> assign(:invalid_gtin_indices, MapSet.new())
      |> assign(:gtin_errors, %{})
      |> assign(:analysis_progress, nil)
-     |> assign(:error, nil)}
+     |> assign(:error, nil)
+     |> assign(:browse_open, false)
+     |> assign(:browse_index, nil)
+     |> assign(:browse_search, "")
+     |> assign(:browse_results, [])
+     |> assign(:chat_messages, [])
+     |> assign(:chat_input, "")
+     |> assign(:chat_processing, false)
+     |> assign(:chat_open, false)
+     |> assign(:raw_headers, [])
+     |> assign(:raw_rows, [])
+     |> assign(:column_mapping, %{})}
+  end
+
+  @impl true
+  def handle_event("toggle_chat", _params, socket) do
+    {:noreply, assign(socket, :chat_open, !socket.assigns.chat_open)}
+  end
+
+  @impl true
+  def handle_event("open_browse_modal", %{"index" => idx_str}, socket) do
+    idx = parse_index(idx_str)
+    results = browse_search_results("")
+
+    {:noreply,
+     socket
+     |> assign(:browse_open, true)
+     |> assign(:browse_index, idx)
+     |> assign(:browse_search, "")
+     |> assign(:browse_results, results)}
+  end
+
+  @impl true
+  def handle_event("close_browse_modal", _params, socket) do
+    {:noreply,
+     socket
+     |> assign(:browse_open, false)
+     |> assign(:browse_index, nil)
+     |> assign(:browse_search, "")
+     |> assign(:browse_results, [])}
+  end
+
+  @impl true
+  def handle_event("browse_search", %{"q" => q}, socket) do
+    results = browse_search_results(String.trim(q))
+    {:noreply, socket |> assign(:browse_search, q) |> assign(:browse_results, results)}
+  end
+
+  @impl true
+  def handle_event("apply_browse", %{"index" => idx_str, "brick" => brick}, socket) do
+    idx = parse_index(idx_str)
+
+    if idx == nil or idx < 0 or idx >= length(socket.assigns.reviewed_products) or brick == "" do
+      {:noreply, assign(socket, :browse_open, false)}
+    else
+      updated =
+        List.update_at(socket.assigns.reviewed_products, idx, fn p ->
+          prev = p.classification || p[:classification]
+
+          p
+          |> Map.put(:classification, String.trim(brick))
+          |> Map.put(:previous_classification, prev)
+        end)
+
+      {:noreply,
+       socket
+       |> assign(:reviewed_products, updated)
+       |> assign(:cleaned_products, updated)
+       |> assign(:classification_descriptions, classification_descriptions_from_products(updated))
+       |> assign(:duplicate_indices, duplicate_indices(updated))
+       |> assign(:invalid_gtin_indices, invalid_gtin_indices(updated))
+       |> assign(:gtin_errors, gtin_errors_map(updated))
+       |> assign(:browse_open, false)
+       |> assign(:browse_index, nil)
+       |> assign(:browse_search, "")
+       |> assign(:browse_results, [])}
+    end
+  end
+
+  @impl true
+  def handle_event("chat_input_change", %{"chat_input" => val}, socket) do
+    {:noreply, assign(socket, :chat_input, val)}
+  end
+
+  @impl true
+  def handle_event("send_chat_command", %{"chat_input" => cmd}, socket) do
+    cmd = String.trim(cmd)
+
+    if cmd == "" or socket.assigns.chat_processing do
+      {:noreply, socket}
+    else
+      user_msg = %{role: :user, content: cmd, id: System.unique_integer([:positive])}
+      products = socket.assigns.reviewed_products
+      pid = self()
+
+      Task.start(fn ->
+        result = ProductChatbot.parse_command(cmd, products)
+        send(pid, {:chat_result, result, products})
+      end)
+
+      {:noreply,
+       socket
+       |> assign(:chat_messages, socket.assigns.chat_messages ++ [user_msg])
+       |> assign(:chat_input, "")
+       |> assign(:chat_processing, true)}
+    end
+  end
+
+  @impl true
+  def handle_info({:chat_result, result, _snapshot}, socket) do
+    products = socket.assigns.reviewed_products
+
+    {reply_content, updated_products} =
+      case result do
+        {:ok, op} ->
+          {updated, count} = ProductChatbot.apply_op(products, op)
+          summary = Map.get(op, "summary", "Done.")
+          {summary <> " (#{count} product#{if count == 1, do: "", else: "s"} updated)", updated}
+
+        {:error, reason} ->
+          {reason, products}
+      end
+
+    bot_msg = %{role: :bot, content: reply_content, id: System.unique_integer([:positive])}
+
+    updated_products =
+      Enum.sort_by(updated_products, fn p -> to_string(p[:code] || p["code"] || "") end)
+
+    {:noreply,
+     socket
+     |> assign(:chat_messages, socket.assigns.chat_messages ++ [bot_msg])
+     |> assign(:chat_processing, false)
+     |> assign(:reviewed_products, updated_products)
+     |> assign(:cleaned_products, updated_products)
+     |> assign(
+       :classification_descriptions,
+       classification_descriptions_from_products(updated_products)
+     )
+     |> assign(:duplicate_indices, duplicate_indices(updated_products))
+     |> assign(:invalid_gtin_indices, invalid_gtin_indices(updated_products))
+     |> assign(:gtin_errors, gtin_errors_map(updated_products))}
   end
 
   @impl true
@@ -264,7 +471,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
        |> assign(:duplicate_indices, duplicate_indices(updated))
        |> assign(:invalid_gtin_indices, invalid_gtin_indices(updated))
        |> assign(:gtin_errors, gtin_errors_map(updated))}
-  end
+    end
   end
 
   @impl true
@@ -378,8 +585,8 @@ defmodule ClassifyWeb.ClassifierLive.Index do
   defp flatten_value(_), do: nil
 
   @impl true
-  def handle_info({:analysis_progress, current, total}, socket) do
-    {:noreply, assign(socket, :analysis_progress, "Batch #{current} of #{total}")}
+  def handle_info({:analysis_progress, progress}, socket) do
+    {:noreply, assign(socket, :analysis_progress, progress)}
   end
 
   @impl true
@@ -389,6 +596,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
     reviewed_with_original =
       Enum.zip(products, reviewed)
       |> Enum.map(fn {orig, rev} -> Map.put(rev, :original, orig) end)
+      |> Enum.sort_by(fn p -> to_string(p[:code] || p["code"] || "") end)
 
     {:noreply,
      socket
@@ -477,6 +685,14 @@ defmodule ClassifyWeb.ClassifierLive.Index do
         box-shadow: 0 0 0 2px rgba(0,80,160,.25);
         border-color: var(--gs1-blue-light);
       }
+      @keyframes bounce {
+        0%, 80%, 100% { transform: translateY(0); }
+        40%           { transform: translateY(-5px); }
+      }
+      @keyframes spin {
+        from { transform: rotate(0deg); }
+        to   { transform: rotate(360deg); }
+      }
     </style>
 
     <div style="font-family:'DM Sans',system-ui,sans-serif; background:var(--gs1-gray-50); min-height:100vh;">
@@ -493,7 +709,10 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                 GS1 Kenya Product Classifier
               </h1>
             </div>
-            <p class="mt-4" style="font-size:.75rem; color:var(--gs1-gray-400); margin:0; margin-top: 20px">
+            <p
+              class="mt-4"
+              style="font-size:.75rem; color:var(--gs1-gray-400); margin:0; margin-top: 20px"
+            >
               Upload · Review · Classify · Export
             </p>
           </div>
@@ -507,29 +726,20 @@ defmodule ClassifyWeb.ClassifierLive.Index do
         <%!-- ── Progress Steps ─────────────────────────────────────────── --%>
         <div style="background:#fff; border:1px solid var(--gs1-gray-200); border-radius:12px; padding:1.25rem 1.5rem; margin-bottom:1.5rem;">
           <ol style="display:flex; align-items:center; list-style:none; margin:0; padding:0; gap:0;">
-            <%= for {step_name, step_label, step_icon, idx} <- [
-              {:upload,   "Upload",   "📁", 1},
-              {:review,   "Review",   "🔍", 2},
-              {:analysed, "Classify", "🏷️", 3}
+            <%= for {step_name, step_label, idx} <- [
+              {:upload,   "Upload",   1},
+              {:mapping,  "Map",      2},
+              {:review,   "Review",   3},
+              {:analysed, "Classify", 4}
             ] do %>
-              <li style={"display:flex; align-items:center; " <> if(idx < 3, do: "flex-1;", else: "")}>
+              <li style={"display:flex; align-items:center; " <> if(idx < 4, do: "flex-1;", else: "")}>
                 <div style="display:flex; align-items:center; gap:.6rem;">
-                  <%!-- Circle --%>
-                  <div style={"
-                    width:2rem; height:2rem; border-radius:50%;
-                    display:flex; align-items:center; justify-content:center;
-                    font-size:.75rem; font-weight:700;
-                    transition: background .2s, border-color .2s;
-                    " <>
+                  <div style={"width:2rem; height:2rem; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:.75rem; font-weight:700; transition:background .2s, border-color .2s; " <>
                     cond do
-                      step_complete?(@step, step_name) ->
-                        "background:var(--gs1-blue); border:2px solid var(--gs1-blue); color:#fff;"
-                      @step == step_name ->
-                        "background:var(--gs1-orange); border:2px solid var(--gs1-orange); color:#fff;"
-                      true ->
-                        "background:#fff; border:2px solid var(--gs1-gray-200); color:var(--gs1-gray-400);"
-                    end
-                  }>
+                      step_complete?(@step, step_name) -> "background:var(--gs1-blue); border:2px solid var(--gs1-blue); color:#fff;"
+                      @step == step_name -> "background:var(--gs1-orange); border:2px solid var(--gs1-orange); color:#fff;"
+                      true -> "background:#fff; border:2px solid var(--gs1-gray-200); color:var(--gs1-gray-400);"
+                    end}>
                     <%= if step_complete?(@step, step_name) do %>
                       <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
                         <path
@@ -542,23 +752,18 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                       {idx}
                     <% end %>
                   </div>
-                  <%!-- Label --%>
                   <span style={"font-size:.8rem; font-weight:600; " <>
                     cond do
                       @step == step_name -> "color:var(--gs1-blue);"
                       step_complete?(@step, step_name) -> "color:var(--gs1-gray-700);"
                       true -> "color:var(--gs1-gray-400);"
-                    end
-                  }>
+                    end}>
                     {step_label}
                   </span>
                 </div>
-                <%!-- Connector line --%>
-                <%= if idx < 3 do %>
+                <%= if idx < 4 do %>
                   <div style={"flex:1; height:2px; margin:0 1rem; border-radius:2px; " <>
-                    if(step_complete?(@step, step_name),
-                      do: "background:var(--gs1-blue);",
-                      else: "background:var(--gs1-gray-200);")}>
+                    if(step_complete?(@step, step_name), do: "background:var(--gs1-blue);", else: "background:var(--gs1-gray-200);")}>
                   </div>
                 <% end %>
               </li>
@@ -661,6 +866,116 @@ defmodule ClassifyWeb.ClassifierLive.Index do
             </div>
 
             <%!-- ════════════════════════════════════════════════════════════════
+               STEP: MAPPING — assign CSV columns to product fields
+               ════════════════════════════════════════════════════════════════ --%>
+          <% :mapping -> %>
+            <% preview_row = List.first(@raw_rows) %>
+            <div style="background:#fff; border:1px solid var(--gs1-gray-200); border-radius:16px; overflow:hidden;">
+              <div style="padding:1.1rem 1.4rem; border-bottom:1px solid var(--gs1-gray-100); display:flex; align-items:flex-start; justify-content:space-between; gap:1rem;">
+                <div>
+                  <h3 style="font-size:.9rem; font-weight:700; color:var(--gs1-blue); margin:0 0 .2rem;">
+                    Map Your Columns
+                  </h3>
+                  <p style="font-size:.73rem; color:var(--gs1-gray-400); margin:0;">
+                    Detected
+                    <strong style="color:var(--gs1-gray-700);">{length(@raw_headers)} columns</strong>
+                    and <strong style="color:var(--gs1-gray-700);">{length(@raw_rows)} rows</strong>.
+                    Assign each to the correct field.
+                  </p>
+                </div>
+                <div style="display:flex; flex-wrap:wrap; gap:.3rem; max-width:340px; justify-content:flex-end; flex-shrink:0;">
+                  <%= for h <- @raw_headers do %>
+                    <span style="font-size:.62rem; padding:.2rem .5rem; background:var(--gs1-gray-50); border:1px solid var(--gs1-gray-200); border-radius:999px; color:var(--gs1-gray-700); white-space:nowrap; font-family:monospace;">
+                      {h}
+                    </span>
+                  <% end %>
+                </div>
+              </div>
+              <div style="padding:1.1rem 1.4rem;">
+                <div style="display:grid; gap:.65rem;">
+                  <%= for {field_key, field_label, field_hint, required} <- [
+                    {:code,          "Barcode / Code",  "GTIN-13 or product barcode",   true},
+                    {:name,          "Brand Name",      "Brand or manufacturer name",   true},
+                    {:description,   "Description",     "Full product description",     true},
+                    {:weight,        "Weight / Volume", "Numeric value, e.g. 500",      false},
+                    {:uom,           "Unit of Measure", "e.g. GRM, MLT, LTR",          false},
+                    {:target_market, "Target Market",   "KE, UG, or 001 for global",   false}
+                  ] do %>
+                    <% mapped_col = Map.get(@column_mapping, field_key)
+
+                    preview_val =
+                      if preview_row && mapped_col, do: Map.get(preview_row, mapped_col), else: nil
+
+                    preview_str =
+                      if preview_val, do: to_string(preview_val) |> String.slice(0, 40), else: nil %>
+                    <div style={"display:grid; grid-template-columns:190px 1fr 160px; align-items:center; gap:.85rem; padding:.65rem .9rem; border-radius:10px; " <>
+                      if(mapped_col, do: "background:var(--gs1-gray-50); border:1px solid var(--gs1-gray-100);", else: "background:#fff8f5; border:1px solid #ffd4c2;")}>
+                      <div>
+                        <div style="display:flex; align-items:center; gap:.35rem;">
+                          <span style="font-size:.78rem; font-weight:700; color:var(--gs1-gray-900);">
+                            {field_label}
+                          </span>
+                          <%= if required do %>
+                            <span style="font-size:.58rem; font-weight:700; background:var(--gs1-orange); color:#fff; padding:.1rem .35rem; border-radius:999px;">
+                              REQ
+                            </span>
+                          <% end %>
+                        </div>
+                        <p style="font-size:.65rem; color:var(--gs1-gray-400); margin:.1rem 0 0;">
+                          {field_hint}
+                        </p>
+                      </div>
+                      <form phx-change="update_mapping" style="margin:0; width:100%;">
+                        <input type="hidden" name="field" value={field_key} />
+                        <select
+                          name="column"
+                          style={"width:100%; padding:.42rem .65rem; border-radius:8px; font-size:.76rem; color:var(--gs1-gray-700); outline:none; cursor:pointer; " <>
+                            if(mapped_col, do: "border:1px solid var(--gs1-gray-200); background:#fff;", else: "border:1px solid #f0a080; background:#fff8f5;")}
+                        >
+                          <option value="">— Not in file —</option>
+                          <%= for h <- @raw_headers do %>
+                            <option value={h} selected={mapped_col == h}>{h}</option>
+                          <% end %>
+                        </select>
+                      </form>
+                      <div>
+                        <%= if preview_str && preview_str != "" do %>
+                          <p style="font-size:.63rem; color:var(--gs1-gray-400); margin:0 0 .1rem; text-transform:uppercase; letter-spacing:.05em;">
+                            Preview
+                          </p>
+                          <p
+                            style="font-size:.73rem; color:var(--gs1-gray-700); margin:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-family:monospace;"
+                            title={to_string(preview_val)}
+                          >
+                            {preview_str}
+                          </p>
+                        <% else %>
+                          <p style="font-size:.7rem; color:var(--gs1-gray-300); margin:0; font-style:italic;">
+                            No preview
+                          </p>
+                        <% end %>
+                      </div>
+                    </div>
+                  <% end %>
+                </div>
+              </div>
+              <div style="padding:.85rem 1.4rem; border-top:1px solid var(--gs1-gray-100); display:flex; align-items:center; justify-content:space-between; background:var(--gs1-gray-50); border-radius:0 0 16px 16px;">
+                <button
+                  phx-click="reset"
+                  style="padding:.45rem .9rem; border:1px solid var(--gs1-gray-200); background:#fff; border-radius:7px; font-size:.75rem; font-weight:600; color:var(--gs1-gray-700); cursor:pointer;"
+                >
+                  ← Cancel
+                </button>
+                <button
+                  phx-click="confirm_mapping"
+                  style="padding:.45rem 1.2rem; border:none; background:var(--gs1-orange); color:#fff; border-radius:7px; font-size:.78rem; font-weight:700; cursor:pointer;"
+                >
+                  Apply Mapping &amp; Review →
+                </button>
+              </div>
+            </div>
+
+            <%!-- ════════════════════════════════════════════════════════════════
                STEP: REVIEW
                ════════════════════════════════════════════════════════════════ --%>
           <% :review -> %>
@@ -671,36 +986,70 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                     Review Uploaded Data
                   </h3>
                   <p style="font-size:.73rem; color:var(--gs1-gray-400); margin:0;">
-                    Found {length(@products)} products — first 10 shown
+                    {length(@products)} product{if length(@products) == 1, do: "", else: "s"} · all columns · scroll to review
                   </p>
                 </div>
               </div>
 
-              <div style="overflow-x:auto;">
-                <table style="width:100%; border-collapse:collapse;">
-                  <thead>
-                    <tr style="background:var(--gs1-gray-50); border-bottom:1px solid var(--gs1-gray-100);">
-                      <%= for label <- ["Code","Name","Description","Class."] do %>
-                        <th style="padding:.65rem 1rem; text-align:left; font-size:.7rem; font-weight:700; color:var(--gs1-gray-400); text-transform:uppercase; letter-spacing:.07em; white-space:nowrap;">
-                          {label}
+              <div style="overflow-x:auto; max-height:60vh; overflow-y:auto;">
+                <table style="width:100%; border-collapse:collapse; min-width:900px;">
+                  <thead style="position:sticky; top:0; z-index:2;">
+                    <tr style="background:var(--gs1-gray-50); border-bottom:1px solid var(--gs1-gray-200);">
+                      <%= for {lbl, cs} <- [
+                        {"Code",          "width:10rem;"},
+                        {"Name",          "width:14rem;"},
+                        {"Description",   "width:18rem;"},
+                        {"Weight",        "width:6rem; text-align:right;"},
+                        {"UOM",           "width:5rem;"},
+                        {"Target Market", "width:8rem;"}
+                      ] do %>
+                        <th style={"padding:.6rem 1rem; text-align:left; font-size:.68rem; font-weight:700; color:var(--gs1-gray-400); text-transform:uppercase; letter-spacing:.07em; white-space:nowrap; #{cs}"}>
+                          {lbl}
                         </th>
                       <% end %>
                     </tr>
                   </thead>
                   <tbody>
-                    <%= for product <- Enum.take(@products, 10) do %>
+                    <%= for product <- @products do %>
                       <tr style="border-bottom:1px solid var(--gs1-gray-100);">
-                        <td style="padding:.6rem 1rem; font-size:.75rem; color:var(--gs1-gray-400); font-family:monospace;">
+                        <td style="padding:.5rem 1rem; font-size:.73rem; color:var(--gs1-gray-400); font-family:monospace; white-space:nowrap;">
                           {product.code}
                         </td>
-                        <td style="padding:.6rem 1rem; font-size:.75rem; color:var(--gs1-gray-700); font-weight:600;">
+                        <td style="padding:.5rem 1rem; font-size:.73rem; color:var(--gs1-gray-700); font-weight:600; white-space:nowrap; max-width:14rem; overflow:hidden; text-overflow:ellipsis;">
                           {product.name}
                         </td>
-                        <td style="padding:.6rem 1rem; font-size:.75rem; color:var(--gs1-gray-400); max-width:20rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
+                        <td
+                          style="padding:.5rem 1rem; font-size:.73rem; color:var(--gs1-gray-500); max-width:18rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"
+                          title={product.description}
+                        >
                           {product.description}
                         </td>
-                        <td style="padding:.6rem 1rem; font-size:.75rem; color:var(--gs1-gray-400); font-family:monospace;">
-                          {product.classification || "—"}
+                        <td style="padding:.5rem 1rem; font-size:.73rem; color:var(--gs1-gray-700); text-align:right; white-space:nowrap;">
+                          {product.weight || "—"}
+                        </td>
+                        <td style="padding:.5rem 1rem; font-size:.73rem; white-space:nowrap;">
+                          <%= if product.uom && product.uom != "" do %>
+                            <span style="font-size:.67rem; font-weight:700; background:var(--gs1-gray-100); color:var(--gs1-gray-700); padding:.15rem .45rem; border-radius:5px; font-family:monospace;">
+                              {product.uom}
+                            </span>
+                          <% else %>
+                            <span style="color:var(--gs1-gray-300);">—</span>
+                          <% end %>
+                        </td>
+                        <td style="padding:.5rem 1rem; font-size:.73rem; white-space:nowrap;">
+                          <%= if product.target_market && product.target_market != "" do %>
+                            <span style={"font-size:.67rem; font-weight:700; padding:.15rem .45rem; border-radius:5px; " <>
+                              case product.target_market do
+                                "001" -> "background:#EBF2FF; color:var(--gs1-blue);"
+                                "KE"  -> "background:#F0FFF4; color:#166534;"
+                                "UG"  -> "background:#FFF7ED; color:#92400E;"
+                                _     -> "background:var(--gs1-gray-100); color:var(--gs1-gray-700);"
+                              end}>
+                              {product.target_market}
+                            </span>
+                          <% else %>
+                            <span style="color:var(--gs1-gray-300);">—</span>
+                          <% end %>
                         </td>
                       </tr>
                     <% end %>
@@ -710,11 +1059,15 @@ defmodule ClassifyWeb.ClassifierLive.Index do
 
               <div style="padding:.85rem 1.4rem; border-top:1px solid var(--gs1-gray-100); background:var(--gs1-gray-50); display:flex; align-items:center; justify-content:space-between;">
                 <p style="font-size:.73rem; color:var(--gs1-gray-400); margin:0;">
-                  {if length(@products) > 10,
-                    do: "Showing 10 of #{length(@products)} products",
-                    else: ""}
+                  {length(@products)} product{if length(@products) == 1, do: "", else: "s"} · scroll to see all
                 </p>
                 <div style="display:flex; gap:.5rem;">
+                  <button
+                    phx-click="back_to_mapping"
+                    style="padding:.45rem .9rem; border:1px solid var(--gs1-gray-200); background:#fff; border-radius:7px; font-size:.75rem; font-weight:600; color:var(--gs1-gray-700); cursor:pointer;"
+                  >
+                    ← Remap Columns
+                  </button>
                   <button
                     phx-click="reset"
                     style="padding:.45rem .9rem; border:1px solid var(--gs1-gray-200); background:#fff; border-radius:7px; font-size:.75rem; font-weight:600; color:var(--gs1-gray-700); cursor:pointer;"
@@ -739,161 +1092,83 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                       >
                         <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
                       </svg>
-                      {@analysis_progress || "Analysing…"}
+                      {if is_map(@analysis_progress),
+                        do: "Processing #{@analysis_progress.processed}/#{@analysis_progress.total}…",
+                        else: @analysis_progress || "Analysing…"}
                     <% else %>
-                      Classify with GS1 AI →
+                      Classify with GS1 Kenya AI →
                     <% end %>
                   </button>
                 </div>
               </div>
 
-              <%!-- ── Animated analysis steps modal overlay ────────────────────── --%>
+              <%!-- ── Analysis progress modal ────────────────────────────────── --%>
               <%= if @processing do %>
+                <% prog =
+                  if is_map(@analysis_progress),
+                    do: @analysis_progress,
+                    else: %{processed: 0, total: length(@products), batch: 0, total_batches: 0}
+
+                pct = if prog.total > 0, do: round(prog.processed / prog.total * 100), else: 0 %>
                 <div style="position:fixed; inset:0; background:rgba(0,20,60,.55); z-index:100; display:flex; align-items:center; justify-content:center; backdrop-filter:blur(4px);">
-                  <div style="background:#fff; border-radius:20px; padding:2.5rem 2.75rem; width:440px; max-width:calc(100vw - 2rem); box-shadow:0 32px 80px rgba(0,20,60,.25);">
-                    <%!-- GS1 logo row --%>
+                  <div style="background:#fff; border-radius:20px; padding:2.5rem 2.75rem; width:400px; max-width:calc(100vw - 2rem); box-shadow:0 32px 80px rgba(0,20,60,.25);">
+                    <%!-- Header --%>
                     <div style="display:flex; align-items:center; gap:.75rem; margin-bottom:1.75rem;">
-                      <div style="display:flex; align-items:flex-end; gap:1.5px; height:28px;">
-                        <%= for w <- [2,4,1.5,5,1.5,3,2,6,1.5,4,2] do %>
-                          <div style={"width:#{w}px; height:#{70 + :rand.uniform(30)}%; background:var(--gs1-blue); border-radius:1px;"}>
-                          </div>
-                        <% end %>
-                      </div>
+                      <img src="/images/gs1.png" class="h-12  object-cover" />
                       <div>
                         <p style="font-size:.65rem; font-weight:800; letter-spacing:.12em; color:var(--gs1-blue); margin:0;">
-                          GS1 AI PRODUCT CLASSIFIER
+                          GS1 KENYA AI PRODUCT CLASSIFIER
                         </p>
                         <p style="font-size:.68rem; color:var(--gs1-gray-400); margin:0;">
-                          Running classification pipeline…
+                          Analysing with Artificial Intelligence…
                         </p>
                       </div>
                     </div>
 
-                    <%!-- Overall progress bar --%>
-                    <div style="height:4px; background:var(--gs1-gray-100); border-radius:4px; overflow:hidden; margin-bottom:1.75rem; position:relative;">
-                      <div style="position:absolute; inset:0; background:linear-gradient(90deg, transparent, rgba(255,255,255,.6), transparent); animation:gs1-slide 1.4s infinite;">
+                    <%!-- Stat row --%>
+                    <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:.75rem; margin-bottom:1.5rem;">
+                      <div style="background:var(--gs1-gray-50); border-radius:10px; padding:.65rem .85rem; text-align:center;">
+                        <p style="font-size:1.5rem; font-weight:800; color:var(--gs1-blue); margin:0; line-height:1;">
+                          {prog.processed}
+                        </p>
+                        <p style="font-size:.6rem; color:var(--gs1-gray-400); margin:.15rem 0 0; text-transform:uppercase; letter-spacing:.06em;">
+                          Done
+                        </p>
                       </div>
-                      <div style={"height:100%; background:linear-gradient(90deg, var(--gs1-blue), var(--gs1-orange)); border-radius:4px; transition:width .4s ease; width:" <>
-                        (case @analysis_progress do
-                          "Getting brand name…"    -> "20%"
-                          "Reading descriptions…"  -> "40%"
-                          "Checking GTINs…"        -> "62%"
-                          "Assigning GS1 classes…" -> "84%"
-                          _                        -> "10%"
-                        end)
-                      }>
+                      <div style="background:var(--gs1-gray-50); border-radius:10px; padding:.65rem .85rem; text-align:center;">
+                        <p style="font-size:1.5rem; font-weight:800; color:var(--gs1-gray-700); margin:0; line-height:1;">
+                          {prog.total - prog.processed}
+                        </p>
+                        <p style="font-size:.6rem; color:var(--gs1-gray-400); margin:.15rem 0 0; text-transform:uppercase; letter-spacing:.06em;">
+                          Remaining
+                        </p>
+                      </div>
+                      <div style="background:var(--gs1-gray-50); border-radius:10px; padding:.65rem .85rem; text-align:center;">
+                        <p style="font-size:1.5rem; font-weight:800; color:var(--gs1-gray-700); margin:0; line-height:1;">
+                          {prog.total}
+                        </p>
+                        <p style="font-size:.6rem; color:var(--gs1-gray-400); margin:.15rem 0 0; text-transform:uppercase; letter-spacing:.06em;">
+                          Total
+                        </p>
                       </div>
                     </div>
 
-                    <%!-- Step list --%>
-                    <ul style="list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:.9rem;">
-                      <%= for {label, icon, active_phase} <- [
-                        {"Extracting brand names",         "🏷️",  "Getting brand name…"},
-                        {"Reading product descriptions",   "📋",  "Reading descriptions…"},
-                        {"Validating GTINs (EAN-13)",       "🔢",  "Checking GTINs…"},
-                        {"Assigning GS1 brick classes",    "📦",  "Assigning GS1 classes…"}
-                      ] do %>
-                        <% phase_order = %{
-                          "Getting brand name…" => 1,
-                          "Reading descriptions…" => 2,
-                          "Checking GTINs…" => 3,
-                          "Assigning GS1 classes…" => 4,
-                          nil => 0
-                        }
+                    <%!-- Progress bar --%>
+                    <div style="margin-bottom:.4rem; display:flex; justify-content:space-between; align-items:baseline;">
+                      <span style="font-size:.7rem; font-weight:600; color:var(--gs1-gray-700);">
+                        Batch {prog.batch} of {prog.total_batches}
+                      </span>
+                      <span style="font-size:.7rem; font-weight:700; color:var(--gs1-blue);">
+                        {pct}%
+                      </span>
+                    </div>
+                    <div style="height:8px; background:var(--gs1-gray-100); border-radius:4px; overflow:hidden; margin-bottom:1.5rem;">
+                      <div style={"height:100%; background:linear-gradient(90deg, var(--gs1-blue), var(--gs1-orange)); border-radius:4px; transition:width .4s ease; width:#{pct}%;"}>
+                      </div>
+                    </div>
 
-                        current_order = Map.get(phase_order, @analysis_progress, 0)
-                        this_order = Map.get(phase_order, active_phase, 0)
-                        is_done = current_order > this_order
-                        is_active = @analysis_progress == active_phase %>
-                        <li style={"display:flex; align-items:center; gap:.85rem; animation:gs1-fade-up .3s ease both; animation-delay:#{(this_order - 1) * 80}ms;"}>
-                          <%!-- Status indicator --%>
-                          <div style={"width:28px; height:28px; border-radius:50%; flex-shrink:0; display:flex; align-items:center; justify-content:center; font-size:.8rem; transition:all .25s; " <>
-                            cond do
-                              is_done   -> "background:var(--gs1-blue); animation:gs1-check-in .35s ease both;"
-                              is_active -> "background:var(--gs1-orange-lt); border:2px solid var(--gs1-orange);"
-                              true      -> "background:var(--gs1-gray-50); border:2px solid var(--gs1-gray-200);"
-                            end
-                          }>
-                            <%= cond do %>
-                              <% is_done -> %>
-                                <svg width="12" height="12" viewBox="0 0 20 20" fill="white">
-                                  <path
-                                    fill-rule="evenodd"
-                                    d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
-                                    clip-rule="evenodd"
-                                  />
-                                </svg>
-                              <% is_active -> %>
-                                <svg
-                                  style="animation:gs1-spin .8s linear infinite;"
-                                  width="13"
-                                  height="13"
-                                  viewBox="0 0 24 24"
-                                  fill="none"
-                                  stroke="var(--gs1-orange)"
-                                  stroke-width="2.5"
-                                >
-                                  <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4" />
-                                </svg>
-                              <% true -> %>
-                                <span style="font-size:.7rem;">{icon}</span>
-                            <% end %>
-                          </div>
-
-                          <%!-- Label --%>
-                          <div style="flex:1;">
-                            <p style={"margin:0; font-size:.82rem; font-weight:600; " <>
-                              cond do
-                                is_done   -> "color:var(--gs1-blue);"
-                                is_active -> "color:var(--gs1-gray-900);"
-                                true      -> "color:var(--gs1-gray-400);"
-                              end
-                            }>
-                              {label}
-                            </p>
-                            <%= if is_active do %>
-                              <%!-- Shimmer skeleton text --%>
-                              <div style="margin-top:.3rem; display:flex; gap:.4rem;">
-                                <div
-                                  class="gs1-shimmer"
-                                  style="height:8px; width:60%; border-radius:4px;"
-                                >
-                                </div>
-                                <div
-                                  class="gs1-shimmer"
-                                  style="height:8px; width:25%; border-radius:4px;"
-                                >
-                                </div>
-                              </div>
-                            <% end %>
-                            <%= if is_done do %>
-                              <p style="margin:.1rem 0 0; font-size:.7rem; color:var(--gs1-gray-400);">
-                                Complete
-                              </p>
-                            <% end %>
-                          </div>
-
-                          <%!-- Pill badge --%>
-                          <%= cond do %>
-                            <% is_done -> %>
-                              <span style="font-size:.65rem; font-weight:700; color:var(--gs1-blue); background:#EBF2FF; padding:.2rem .6rem; border-radius:999px; letter-spacing:.03em;">
-                                DONE
-                              </span>
-                            <% is_active -> %>
-                              <span style="font-size:.65rem; font-weight:700; color:var(--gs1-orange); background:var(--gs1-orange-lt); padding:.2rem .6rem; border-radius:999px; letter-spacing:.03em; animation:gs1-pulse 1.2s infinite;">
-                                RUNNING
-                              </span>
-                            <% true -> %>
-                              <span style="font-size:.65rem; font-weight:700; color:var(--gs1-gray-400); background:var(--gs1-gray-100); padding:.2rem .6rem; border-radius:999px; letter-spacing:.03em;">
-                                QUEUED
-                              </span>
-                          <% end %>
-                        </li>
-                      <% end %>
-                    </ul>
-
-                    <p style="margin:1.5rem 0 0; font-size:.72rem; color:var(--gs1-gray-400); text-align:center;">
-                      Do not close this window — processing {length(@products)} products
+                    <p style="margin:0; font-size:.72rem; color:var(--gs1-gray-400); text-align:center;">
+                      Do not close this window
                     </p>
                   </div>
                 </div>
@@ -983,8 +1258,8 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                           style={"" <> if(has_error, do: "background:#FFF5F5; border-left:3px solid var(--gs1-red);", else: "background:#fff; border-left:3px solid transparent;")}
                           title={
                             [
-                              (if is_dup, do: "Duplicate barcode — double allocation", else: nil),
-                              (if is_invalid_gtin, do: "Invalid EAN-13 GTIN", else: nil)
+                              if(is_dup, do: "Duplicate barcode — double allocation", else: nil),
+                              if(is_invalid_gtin, do: "Invalid EAN-13 GTIN", else: nil)
                             ]
                             |> Enum.reject(&is_nil/1)
                             |> Enum.join(" · ")
@@ -1005,10 +1280,14 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                                 if(has_error, do: "border-color:#FFAAAA; background:#FFF5F5;", else: "border-color:var(--gs1-gray-200);")}
                             />
                             <%= if is_dup do %>
-                              <p style="margin:.25rem 0 0; font-size:.65rem; color:var(--gs1-red); line-height:1.3;">Duplicate code</p>
+                              <p style="margin:.25rem 0 0; font-size:.65rem; color:var(--gs1-red); line-height:1.3;">
+                                Duplicate code
+                              </p>
                             <% end %>
                             <%= if gtin_error do %>
-                              <p style="margin:.25rem 0 0; font-size:.65rem; color:var(--gs1-red); line-height:1.3;">{gtin_error}</p>
+                              <p style="margin:.25rem 0 0; font-size:.65rem; color:var(--gs1-red); line-height:1.3;">
+                                {gtin_error}
+                              </p>
                             <% end %>
                           </td>
                           <%!-- Name --%>
@@ -1106,6 +1385,14 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                                 style="font-size:.68rem; font-weight:700; color:var(--gs1-blue-light); background:none; border:none; cursor:pointer; white-space:nowrap; padding:0; text-decoration:underline; text-underline-offset:2px;"
                               >
                                 View Similar
+                              </button>
+                              <button
+                                type="button"
+                                phx-click="open_browse_modal"
+                                phx-value-index={idx}
+                                style="font-size:.68rem; font-weight:700; color:var(--gs1-orange); background:none; border:none; cursor:pointer; white-space:nowrap; padding:0; text-decoration:underline; text-underline-offset:2px;"
+                              >
+                                View All
                               </button>
                             </div>
                             <% desc =
@@ -1380,11 +1667,329 @@ defmodule ClassifyWeb.ClassifierLive.Index do
             </div>
         <% end %>
       </div>
+
+      <%!-- ── Floating Bulk-Edit Chatbot ──────────────────────────────────── --%>
+      <%= if @step == :analysed do %>
+        <div style="position:fixed; bottom:0; right:1.5rem; width:360px; z-index:100; font-family:'DM Sans',system-ui,sans-serif;">
+          <button
+            type="button"
+            phx-click="toggle_chat"
+            style="width:100%; display:flex; align-items:center; gap:.65rem; padding:.7rem 1rem; border:none; cursor:pointer; border-radius:12px 12px 0 0; box-shadow:0 -4px 20px rgba(0,20,60,.13); background:var(--gs1-blue);"
+          >
+            <div style="width:26px; height:26px; border-radius:7px; background:rgba(255,255,255,.18); display:flex; align-items:center; justify-content:center; flex-shrink:0; position:relative;">
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="#fff"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
+              </svg>
+              <%= if @chat_processing do %>
+                <span style="position:absolute; top:-3px; right:-3px; width:8px; height:8px; background:var(--gs1-orange); border-radius:50%; border:1.5px solid var(--gs1-blue);">
+                </span>
+              <% end %>
+              <%= if not @chat_processing and length(@chat_messages) > 0 and not @chat_open do %>
+                <span style="position:absolute; top:-3px; right:-3px; width:8px; height:8px; background:#4ade80; border-radius:50%; border:1.5px solid var(--gs1-blue);">
+                </span>
+              <% end %>
+            </div>
+            <div style="flex:1; text-align:left;">
+              <p style="font-size:.78rem; font-weight:800; color:#fff; margin:0; line-height:1.2;">
+                Bulk-Edit Assistant
+              </p>
+              <p style="font-size:.63rem; color:rgba(255,255,255,.7); margin:0;">
+                <%= if @chat_processing do %>
+                  Thinking…
+                <% else %>
+                  {if length(@chat_messages) == 0,
+                    do: "Ask me to change the data",
+                    else:
+                      "#{length(@chat_messages)} message#{if length(@chat_messages) == 1, do: "", else: "s"}"}
+                <% end %>
+              </p>
+            </div>
+            <svg
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="rgba(255,255,255,.8)"
+              stroke-width="2.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              style={"transition:transform .2s; transform:" <> if(@chat_open, do: "rotate(180deg)", else: "rotate(0deg)")}
+            >
+              <polyline points="18 15 12 9 6 15" />
+            </svg>
+          </button>
+          <%= if @chat_open do %>
+            <div style="background:#fff; border:1px solid var(--gs1-gray-200); border-top:none; box-shadow:0 -4px 30px rgba(0,20,60,.13); display:flex; flex-direction:column; max-height:420px;">
+              <div
+                id="chat-messages"
+                style="flex:1; overflow-y:auto; padding:.85rem 1rem; display:flex; flex-direction:column; gap:.6rem; min-height:120px; max-height:300px;"
+                phx-hook="ScrollBottom"
+              >
+                <%= if @chat_messages == [] do %>
+                  <div style="display:flex; flex-direction:column; align-items:center; padding:1rem .5rem; color:var(--gs1-gray-400); text-align:center; gap:.5rem;">
+                    <p style="font-size:.73rem; margin:0; font-style:italic;">Try a command like:</p>
+                    <div style="display:flex; flex-direction:column; gap:.3rem; width:100%;">
+                      <%= for hint <- ["Set target market to 001 for all", "Set UOM to GRM for all coffee products", "Change classification for cookies to 10001563"] do %>
+                        <button
+                          type="button"
+                          phx-click="send_chat_command"
+                          phx-value-chat_input={hint}
+                          style="font-size:.68rem; padding:.35rem .65rem; background:var(--gs1-gray-50); border:1px solid var(--gs1-gray-200); border-radius:8px; cursor:pointer; color:var(--gs1-gray-700); text-align:left; line-height:1.35;"
+                        >
+                          {hint}
+                        </button>
+                      <% end %>
+                    </div>
+                  </div>
+                <% else %>
+                  <%= for msg <- @chat_messages do %>
+                    <%= if msg.role == :user do %>
+                      <div style="display:flex; justify-content:flex-end;">
+                        <div style="max-width:82%; background:var(--gs1-blue); color:#fff; border-radius:12px 12px 2px 12px; padding:.45rem .8rem; font-size:.77rem; line-height:1.45;">
+                          {msg.content}
+                        </div>
+                      </div>
+                    <% else %>
+                      <div style="display:flex; gap:.45rem; align-items:flex-start;">
+                        <div style="width:20px; height:20px; border-radius:5px; background:var(--gs1-blue); display:flex; align-items:center; justify-content:center; flex-shrink:0; margin-top:.1rem;">
+                          <svg
+                            width="10"
+                            height="10"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="#fff"
+                            stroke-width="2.5"
+                            stroke-linecap="round"
+                            stroke-linejoin="round"
+                          >
+                            <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
+                          </svg>
+                        </div>
+                        <div style="max-width:82%; background:var(--gs1-gray-50); border:1px solid var(--gs1-gray-100); color:var(--gs1-gray-800); border-radius:12px 12px 12px 2px; padding:.45rem .8rem; font-size:.77rem; line-height:1.45;">
+                          {msg.content}
+                        </div>
+                      </div>
+                    <% end %>
+                  <% end %>
+                  <%= if @chat_processing do %>
+                    <div style="display:flex; gap:.45rem; align-items:center;">
+                      <div style="width:20px; height:20px; border-radius:5px; background:var(--gs1-blue); display:flex; align-items:center; justify-content:center; flex-shrink:0;">
+                        <svg
+                          width="10"
+                          height="10"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="#fff"
+                          stroke-width="2.5"
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                        >
+                          <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
+                        </svg>
+                      </div>
+                      <div style="background:var(--gs1-gray-50); border:1px solid var(--gs1-gray-100); border-radius:12px 12px 12px 2px; padding:.45rem .7rem; display:flex; gap:.3rem; align-items:center;">
+                        <span style="width:5px; height:5px; background:var(--gs1-gray-400); border-radius:50%; animation:bounce 1.2s infinite 0s;">
+                        </span>
+                        <span style="width:5px; height:5px; background:var(--gs1-gray-400); border-radius:50%; animation:bounce 1.2s infinite .2s;">
+                        </span>
+                        <span style="width:5px; height:5px; background:var(--gs1-gray-400); border-radius:50%; animation:bounce 1.2s infinite .4s;">
+                        </span>
+                      </div>
+                    </div>
+                  <% end %>
+                <% end %>
+              </div>
+              <div style="border-top:1px solid var(--gs1-gray-100); padding:.6rem .85rem; background:#fff;">
+                <form
+                  phx-submit="send_chat_command"
+                  phx-change="chat_input_change"
+                  style="display:flex; gap:.4rem; align-items:center;"
+                >
+                  <input
+                    type="text"
+                    name="chat_input"
+                    value={@chat_input}
+                    placeholder="e.g. Set target market to 001 for all…"
+                    autocomplete="off"
+                    disabled={@chat_processing}
+                    style={"flex:1; padding:.5rem .75rem; border:1px solid var(--gs1-gray-200); border-radius:8px; font-size:.78rem; color:var(--gs1-gray-700); outline:none; " <> if(@chat_processing, do: "opacity:.6;", else: "")}
+                  />
+                  <button
+                    type="submit"
+                    disabled={@chat_processing or String.trim(@chat_input) == ""}
+                    style={"padding:.5rem .8rem; border:none; border-radius:8px; font-size:.75rem; font-weight:700; cursor:pointer; display:flex; align-items:center; gap:.3rem; flex-shrink:0; " <>
+                      if(@chat_processing or String.trim(@chat_input) == "", do: "background:var(--gs1-gray-200); color:var(--gs1-gray-400); cursor:not-allowed;", else: "background:var(--gs1-blue); color:#fff;")}
+                  >
+                    <svg
+                      width="12"
+                      height="12"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2.5"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    >
+                      <line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" />
+                    </svg>
+                    Send
+                  </button>
+                </form>
+              </div>
+            </div>
+          <% end %>
+        </div>
+      <% end %>
+
+      <%!-- ── Browse All Classifications Modal ──────────────────────────────── --%>
+      <%= if @browse_open do %>
+        <div style="position:fixed; inset:0; background:rgba(0,0,0,.45); z-index:200; display:flex; align-items:center; justify-content:center; padding:1rem;">
+          <div
+            style="background:#fff; border-radius:16px; width:100%; max-width:560px; max-height:88vh; display:flex; flex-direction:column; box-shadow:0 24px 60px rgba(0,20,60,.2); overflow:hidden;"
+            phx-click-stop
+          >
+            <div style="display:flex; align-items:center; justify-content:space-between; padding:.85rem 1.2rem; border-bottom:1px solid var(--gs1-gray-100); background:var(--gs1-gray-50);">
+              <div>
+                <p style="font-size:.8rem; font-weight:800; color:var(--gs1-blue); margin:0;">
+                  Browse GS1 Classifications
+                </p>
+                <p style="font-size:.68rem; color:var(--gs1-gray-400); margin:.1rem 0 0;">
+                  {length(@browse_results)} result{if length(@browse_results) == 1, do: "", else: "s"}
+                </p>
+              </div>
+              <button
+                type="button"
+                phx-click="close_browse_modal"
+                style="background:none; border:none; cursor:pointer; color:var(--gs1-gray-400); padding:.3rem; display:flex; border-radius:6px;"
+              >
+                <svg
+                  width="16"
+                  height="16"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2.5"
+                  viewBox="0 0 24 24"
+                >
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div style="padding:.75rem 1.2rem; border-bottom:1px solid var(--gs1-gray-100);">
+              <div style="position:relative;">
+                <svg
+                  style="position:absolute; left:.7rem; top:50%; transform:translateY(-50%); color:var(--gs1-gray-400);"
+                  width="14"
+                  height="14"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  viewBox="0 0 24 24"
+                >
+                  <circle cx="11" cy="11" r="8" /><path stroke-linecap="round" d="M21 21l-4.35-4.35" />
+                </svg>
+                <form phx-change="browse_search" style="margin:0;">
+                  <input
+                    type="text"
+                    name="q"
+                    placeholder="Search by description or class name…"
+                    value={@browse_search}
+                    autofocus
+                    autocomplete="off"
+                    style="width:100%; padding:.55rem .75rem .55rem 2.2rem; border:1px solid var(--gs1-gray-200); border-radius:8px; font-size:.8rem; color:var(--gs1-gray-700); outline:none; box-sizing:border-box;"
+                  />
+                </form>
+              </div>
+            </div>
+            <div style="overflow-y:auto; flex:1;">
+              <%= if @browse_results == [] do %>
+                <div style="padding:2.5rem; text-align:center; color:var(--gs1-gray-400); font-size:.8rem;">
+                  No classifications match "{@browse_search}"
+                </div>
+              <% else %>
+                <% current_brick =
+                  if @browse_index != nil do
+                    p = Enum.at(@reviewed_products, @browse_index)
+                    if p, do: format_cell(p.classification), else: ""
+                  else
+                    ""
+                  end %>
+                <ul style="list-style:none; margin:0; padding:0;">
+                  <%= for item <- @browse_results do %>
+                    <% is_sel = current_brick == item.brick %>
+                    <li>
+                      <button
+                        type="button"
+                        phx-click="apply_browse"
+                        phx-value-index={@browse_index}
+                        phx-value-brick={item.brick}
+                        style={"width:100%; text-align:left; padding:.75rem 1.2rem; border:none; cursor:pointer; border-bottom:1px solid var(--gs1-gray-100); display:flex; align-items:flex-start; justify-content:space-between; gap:.75rem; " <>
+                          if(is_sel, do: "background:#EBF2FF;", else: "background:#fff; &:hover{background:var(--gs1-gray-50);}")}
+                      >
+                        <div style="flex:1; min-width:0;">
+                          <%!-- Class title (primary) --%>
+                          <p style={"font-size:.82rem; font-weight:700; margin:0 0 .2rem; line-height:1.3; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; " <>
+                            if(is_sel, do: "color:var(--gs1-blue);", else: "color:var(--gs1-gray-900);")}>
+                            {Map.get(item, :class_title) || item.description}
+                          </p>
+                          <%!-- Brick description (secondary) --%>
+                          <p style={"font-size:.73rem; margin:0; line-height:1.4; " <>
+                            if(is_sel, do: "color:var(--gs1-blue);", else: "color:var(--gs1-gray-500);")}>
+                            {item.description}
+                          </p>
+                        </div>
+                        <%!-- Brick code + badge --%>
+                        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:.25rem; flex-shrink:0;">
+                          <span style={"font-family:monospace; font-size:.68rem; font-weight:700; padding:.15rem .45rem; border-radius:5px; " <>
+                            if(is_sel, do: "background:var(--gs1-blue); color:#fff;", else: "background:var(--gs1-gray-100); color:var(--gs1-gray-500);")}>
+                            {item.brick}
+                          </span>
+                          <%= if is_sel do %>
+                            <span style="font-size:.58rem; background:var(--gs1-blue); color:#fff; font-weight:700; padding:.1rem .35rem; border-radius:999px;">
+                              CURRENT
+                            </span>
+                          <% end %>
+                        </div>
+                      </button>
+                    </li>
+                  <% end %>
+                </ul>
+              <% end %>
+            </div>
+          </div>
+        </div>
+      <% end %>
     </div>
     """
   end
 
   # Helper Functions
+
+  # Browse search: rank prefix matches first, cap at 80
+  defp browse_search_results("") do
+    Classifications.all() |> Enum.take(80)
+  end
+
+  defp browse_search_results(q) do
+    kw = String.downcase(q)
+
+    Classifications.search_description_or_class(q)
+    |> Enum.sort_by(fn item ->
+      desc = (item[:description] || "") |> String.downcase()
+      title = (item[:class_title] || "") |> String.downcase()
+      # 0 = starts-with match (best), 1 = partial match
+      if String.starts_with?(title, kw) or String.starts_with?(desc, kw), do: 0, else: 1
+    end)
+    |> Enum.take(80)
+  end
 
   defp format_cell(nil), do: ""
   defp format_cell(""), do: ""
@@ -1477,7 +2082,10 @@ defmodule ClassifyWeb.ClassifierLive.Index do
       true ->
         list = String.graphemes(raw) |> Enum.map(&String.to_integer/1)
         weights = [1, 3, 1, 3, 1, 3, 1, 3, 1, 3, 1, 3]
-        sum = Enum.zip(Enum.take(list, 12), weights) |> Enum.map(fn {d, w} -> d * w end) |> Enum.sum()
+
+        sum =
+          Enum.zip(Enum.take(list, 12), weights) |> Enum.map(fn {d, w} -> d * w end) |> Enum.sum()
+
         expected_check = rem(10 - rem(sum, 10), 10)
         actual_check = Enum.at(list, 12)
 
@@ -1497,6 +2105,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
     |> Enum.with_index()
     |> Enum.reduce(%{}, fn {p, idx}, acc ->
       code = (p[:code] || p["code"]) |> to_string() |> String.trim()
+
       case gtin_error_reason(code) do
         nil -> acc
         reason -> Map.put(acc, idx, reason)
@@ -1585,7 +2194,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
   end
 
   defp step_complete?(current_step, check_step) do
-    step_order = [:upload, :review, :analysed, :classified, :export]
+    step_order = [:upload, :mapping, :review, :analysed, :classified, :export]
     current_idx = Enum.find_index(step_order, &(&1 == current_step)) || 0
     check_idx = Enum.find_index(step_order, &(&1 == check_step)) || 0
     check_idx < current_idx

@@ -72,11 +72,22 @@ defmodule Classify.ProductCleaner do
   defp build_batch_prompt(products) do
     lines =
       Enum.map(products, fn p ->
-        "code: #{p.code}, name: #{p.name}, description: #{p.description}"
+        base = "code: #{p.code}, name: #{p.name}, description: #{p.description}"
+        tm = to_string(p[:target_market] || p["target_market"] || "") |> String.trim()
+
+        hint =
+          cond do
+            tm in ["KE", "UG", "001"] -> ", market_hint: #{tm}"
+            tm != "" -> ", market_hint: #{tm}"
+            true -> ""
+          end
+
+        base <> hint
       end)
 
     "Products (one per line):\n" <> Enum.join(lines, "\n") <>
-      "\n\nReturn a JSON array of objects with keys: name (brand only e.g. 'Vesen', 'Breast Cancer Initiative'), description (full product name + volume + unit e.g. 'Vesen purified water 300mlt'), weight, uom, classification, target_market (same order as input)."
+      "\n\nReturn a JSON array of objects with keys: name (brand only e.g. 'Vesen', 'Breast Cancer Initiative'), description (full product name + volume + unit e.g. 'Vesen purified water 300mlt'), weight, uom, classification, target_market.\n" <>
+      "IMPORTANT: if market_hint is present, use it directly — '001' means global, 'KE' Kenya, 'UG' Uganda. Only override if the hint is clearly wrong."
   end
 
   defp parse_and_merge(products, content) do
@@ -118,7 +129,14 @@ defmodule Classify.ProductCleaner do
     |> Map.put(:weight, pick_number(ai_row["weight"], product.weight))
     |> Map.put(:uom, pick_string(ai_row["uom"], product.uom, ~w(MLT LTR CTL GRM KGM MTR CMT MMT INH PK PA DZN PR ZP H87 U2 AV ONZ LTN AMP KWT WTT VLT KVT)))
     |> Map.put(:classification, pick_classification(ai_row["classification"], product.classification))
-    |> Map.put(:target_market, pick_string(ai_row["target_market"], product.target_market, ~w(KE UG 001)) || "KE")
+    |> Map.put(:target_market, pick_target_market(ai_row["target_market"], product.target_market))
+  end
+
+  # If the original (file-parsed) market is already "001" (multi-country), never
+  # let the AI downgrade it to a single country — the file knows best here.
+  defp pick_target_market(_ai, original) when original in ["001"], do: "001"
+  defp pick_target_market(ai, original) do
+    pick_string(ai, original, ~w(KE UG 001)) || "KE"
   end
 
   defp pick_number(nil, fallback), do: fallback
