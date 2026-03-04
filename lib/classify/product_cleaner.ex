@@ -20,7 +20,7 @@ defmodule Classify.ProductCleaner do
   - When unsure, keep only the first word(s) that identify the brand; drop generic product words like water, milk, juice, purified, fresh, cream, etc.
 
   DESCRIPTION RULES:
-  - Full product name + volume + unit in sentence case, e.g. "Vesen purified water 300mlt".
+  - Full product name + volume + unit in Title Case, e.g. "Vesen Purified Water 300Mlt".
 
   WEIGHT RULES (critical — do NOT convert between units):
   - weight is the raw numeric value from the product, matching the uom field.
@@ -113,7 +113,7 @@ defmodule Classify.ProductCleaner do
 
   defp merge_ai_into_product(product, ai_row) when is_map(ai_row) do
     raw_desc = if is_binary(ai_row["description"]) and String.trim(ai_row["description"]) != "", do: String.trim(ai_row["description"]), else: product.description
-    cleaned_desc = sentence_case(raw_desc)
+    cleaned_desc = title_case(raw_desc)
 
     raw_name = ai_row["name"]
     cleaned_name =
@@ -156,11 +156,15 @@ defmodule Classify.ProductCleaner do
   end
   defp pick_string(_, fallback, _), do: fallback
 
-  defp sentence_case(nil), do: nil
-  defp sentence_case(""), do: ""
-  defp sentence_case(s) when is_binary(s) do
-    s = String.trim(s)
-    if s == "", do: "", else: String.capitalize(String.downcase(s))
+  defp title_case(nil), do: nil
+  defp title_case(""), do: ""
+  defp title_case(s) when is_binary(s) do
+    s
+    |> String.trim()
+    |> String.downcase()
+    |> String.split(" ")
+    |> Enum.map(&String.capitalize/1)
+    |> Enum.join(" ")
   end
 
   defp pick_classification(nil, fallback), do: fallback

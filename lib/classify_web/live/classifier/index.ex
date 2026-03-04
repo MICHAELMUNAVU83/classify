@@ -369,9 +369,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
       end
 
     bot_msg = %{role: :bot, content: reply_content, id: System.unique_integer([:positive])}
-
-    updated_products =
-      Enum.sort_by(updated_products, fn p -> to_string(p[:code] || p["code"] || "") end)
+    updated_products = group_duplicates(updated_products)
 
     {:noreply,
      socket
@@ -596,17 +594,17 @@ defmodule ClassifyWeb.ClassifierLive.Index do
     reviewed_with_original =
       Enum.zip(products, reviewed)
       |> Enum.map(fn {orig, rev} -> Map.put(rev, :original, orig) end)
-      |> Enum.sort_by(fn p -> to_string(p[:code] || p["code"] || "") end)
+      |> group_duplicates()
 
     {:noreply,
      socket
      |> assign(:step, :analysed)
      |> assign(:reviewed_products, reviewed_with_original)
      |> assign(:cleaned_products, reviewed_with_original)
-     |> assign(:classification_descriptions, classification_descriptions_from_products(reviewed))
-     |> assign(:duplicate_indices, duplicate_indices(reviewed))
-     |> assign(:invalid_gtin_indices, invalid_gtin_indices(reviewed))
-     |> assign(:gtin_errors, gtin_errors_map(reviewed))
+     |> assign(:classification_descriptions, classification_descriptions_from_products(reviewed_with_original))
+     |> assign(:duplicate_indices, duplicate_indices(reviewed_with_original))
+     |> assign(:invalid_gtin_indices, invalid_gtin_indices(reviewed_with_original))
+     |> assign(:gtin_errors, gtin_errors_map(reviewed_with_original))
      |> assign(:processing, false)
      |> assign(:analysis_progress, nil)}
   end
@@ -2057,6 +2055,40 @@ defmodule ClassifyWeb.ClassifierLive.Index do
       |> Enum.flat_map(fn {_, indices} -> indices end)
 
     MapSet.new(duplicate_indices)
+  end
+
+  # Reorders products so those sharing the same barcode code are adjacent,
+  # placed at the position of the first occurrence of that code.
+  defp group_duplicates(products) do
+    code_counts =
+      Enum.frequencies_by(products, fn p -> to_string(p[:code] || p["code"] || "") end)
+
+    dup_codes =
+      code_counts
+      |> Enum.filter(fn {_, count} -> count > 1 end)
+      |> Enum.map(&elem(&1, 0))
+      |> MapSet.new()
+
+    grouped = Enum.group_by(products, fn p -> to_string(p[:code] || p["code"] || "") end)
+
+    {result, _seen} =
+      Enum.reduce(products, {[], MapSet.new()}, fn p, {acc, seen} ->
+        code = to_string(p[:code] || p["code"] || "")
+
+        if MapSet.member?(dup_codes, code) do
+          if MapSet.member?(seen, code) do
+            # already emitted this group — skip
+            {acc, seen}
+          else
+            # first encounter: emit the whole group together
+            {acc ++ Map.get(grouped, code, []), MapSet.put(seen, code)}
+          end
+        else
+          {acc ++ [p], seen}
+        end
+      end)
+
+    result
   end
 
   # Returns a specific error reason string, or nil if the code is a valid EAN-13
