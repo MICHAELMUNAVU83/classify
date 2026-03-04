@@ -109,8 +109,8 @@ defmodule ClassifyWeb.ClassifierLive.Index do
          "No valid products found with the current mapping. Please check your column assignments."
        )}
     else
-      {:noreply,
-       socket
+    {:noreply,
+     socket
        |> assign(:step, :review)
        |> assign(:products, products)
        |> assign(:error, nil)}
@@ -514,52 +514,14 @@ defmodule ClassifyWeb.ClassifierLive.Index do
     field_name = payload["field"]
 
     if index_raw != nil and field_name != nil do
-      key = String.to_existing_atom(field_name)
-      value = payload[field_name] || payload["#{index_raw}:#{field_name}"] || flatten_value(payload["value"])
+      # Form-based params: index and field come from hidden inputs,
+      # the actual value is keyed by the field name (the input/select name attribute).
       index = parse_index(index_raw)
-      if index != nil, do: {index, key, value || ""}, else: nil
+      key   = String.to_existing_atom(field_name)
+      value = payload[field_name] || ""
+      if index != nil, do: {index, key, value}, else: nil
     else
-      # Find "index:field" key (our input names)
-      payload
-      |> Enum.find_value(fn
-        {name, value} when is_binary(name) ->
-          if String.contains?(name, ":") do
-            parts = String.split(name, ":", parts: 2)
-
-            if length(parts) == 2 do
-              [idx_str, field_str] = parts
-              index = parse_index(idx_str)
-              key = String.to_existing_atom(field_str)
-              if index != nil, do: {index, key, value}, else: nil
-            end
-          end
-
-        _ ->
-          nil
-      end)
-      |> case do
-        {index, key, value} ->
-          {index, key, value}
-
-        _ ->
-          # Nested value: params["value"] => %{"1:description" => "..."} or %{"value" => "..."}
-          inner = payload["value"]
-
-          if is_map(inner) do
-            Enum.find_value(inner, fn
-              {k, v} when is_binary(k) ->
-                if String.contains?(k, ":") do
-                  [idx_str, field_str] = String.split(k, ":", parts: 2)
-                  index = parse_index(idx_str)
-                  key = String.to_existing_atom(field_str)
-                  if index != nil, do: {index, key, v}, else: nil
-                end
-
-              _ ->
-                nil
-            end)
-          end
-      end
+      nil
     end
   end
 
@@ -715,8 +677,8 @@ defmodule ClassifyWeb.ClassifierLive.Index do
             </div>
             GS1 STANDARDS
           </div>
-        </div>
-
+      </div>
+      
         <%!-- ── Progress Steps ─────────────────────────────────────────── --%>
         <div style="background:#fff; border:1px solid var(--gs1-gray-200); border-radius:12px; padding:1.25rem 1.5rem; margin-bottom:1.5rem;">
           <ol style="display:flex; align-items:center; list-style:none; margin:0; padding:0; gap:0;">
@@ -763,10 +725,10 @@ defmodule ClassifyWeb.ClassifierLive.Index do
               </li>
             <% end %>
           </ol>
-        </div>
+      </div>
 
         <%!-- ── Error Banner ─────────────────────────────────────────────── --%>
-        <%= if @error do %>
+      <%= if @error do %>
           <div style="margin-bottom:1rem; background:#FFF0F0; border:1px solid #FFCCCC; color:var(--gs1-red); font-size:.8rem; padding:.75rem 1rem; border-radius:8px; display:flex; gap:.5rem; align-items:center;">
             <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor">
               <path
@@ -775,10 +737,10 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                 clip-rule="evenodd"
               />
             </svg>
-            {@error}
-          </div>
-        <% end %>
-
+          {@error}
+        </div>
+      <% end %>
+      
         <%!-- ════════════════════════════════════════════════════════════════
              STEP: UPLOAD
              ════════════════════════════════════════════════════════════════ --%>
@@ -787,20 +749,20 @@ defmodule ClassifyWeb.ClassifierLive.Index do
             <div style="max-width:520px; margin:0 auto; background:#fff; border:1px solid var(--gs1-gray-200); border-radius:16px; padding:2.5rem; text-align:center;">
               <%!-- Icon --%>
               <div style="width:56px; height:56px; background:var(--gs1-blue); border-radius:14px; display:flex; align-items:center; justify-content:center; margin:0 auto 1.25rem;">
-                <svg
+              <svg
                   width="26"
                   height="26"
-                  fill="none"
+                fill="none"
                   stroke="white"
                   stroke-width="1.8"
                   viewBox="0 0 24 24"
-                >
-                  <path
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
                     d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"
-                  />
-                </svg>
+                />
+              </svg>
               </div>
               <h3 style="font-size:1rem; font-weight:700; color:var(--gs1-blue); margin:0 0 .3rem;">
                 Upload Product Data
@@ -827,15 +789,15 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                       >
                         <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
                       </svg>
-                      Select File
-                    </span>
-                    <.live_file_input upload={@uploads.product_csv} class="sr-only" />
-                  </label>
+                          Select File
+                        </span>
+                        <.live_file_input upload={@uploads.product_csv} class="sr-only" />
+                      </label>
                   <p style="margin:.6rem 0 0; font-size:.75rem; color:var(--gs1-gray-400);">
                     or drag & drop here
                   </p>
 
-                  <%= for entry <- @uploads.product_csv.entries do %>
+                    <%= for entry <- @uploads.product_csv.entries do %>
                     <div style="margin-top:.8rem; display:inline-flex; align-items:center; gap:.5rem; background:var(--gs1-gray-50); border:1px solid var(--gs1-gray-200); border-radius:8px; padding:.4rem .75rem; font-size:.75rem; color:var(--gs1-gray-700);">
                       <svg width="12" height="12" fill="var(--gs1-blue)" viewBox="0 0 20 20">
                         <path d="M4 4a2 2 0 012-2h4l6 6v8a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" />
@@ -844,8 +806,8 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                       <span style="color:var(--gs1-gray-400);">
                         ({format_bytes(entry.client_size)})
                       </span>
-                    </div>
-                  <% end %>
+                      </div>
+                    <% end %>
                 </div>
 
                 <%= if @uploads.product_csv.entries != [] do %>
@@ -975,7 +937,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
           <% :review -> %>
             <div style="background:#fff; border:1px solid var(--gs1-gray-200); border-radius:16px; overflow:hidden;">
               <div style="padding:1.1rem 1.4rem; border-bottom:1px solid var(--gs1-gray-100); display:flex; align-items:center; justify-content:space-between;">
-                <div>
+            <div>
                   <h3 style="font-size:.9rem; font-weight:700; color:var(--gs1-blue); margin:0 0 .15rem;">
                     Review Uploaded Data
                   </h3>
@@ -999,7 +961,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                       ] do %>
                         <th style={"padding:.6rem 1rem; text-align:left; font-size:.68rem; font-weight:700; color:var(--gs1-gray-400); text-transform:uppercase; letter-spacing:.07em; white-space:nowrap; #{cs}"}>
                           {lbl}
-                        </th>
+                      </th>
                       <% end %>
                     </tr>
                   </thead>
@@ -1062,13 +1024,13 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                   >
                     ← Remap Columns
                   </button>
-                  <button
-                    phx-click="reset"
+                <button
+                  phx-click="reset"
                     style="padding:.45rem .9rem; border:1px solid var(--gs1-gray-200); background:#fff; border-radius:7px; font-size:.75rem; font-weight:600; color:var(--gs1-gray-700); cursor:pointer;"
-                  >
-                    Cancel
-                  </button>
-                  <button
+                >
+                  Cancel
+                </button>
+                <button
                     phx-click="analyse_with_openai"
                     disabled={@processing}
                     style={"padding:.45rem 1.1rem; border:none; border-radius:7px; font-size:.75rem; font-weight:700; cursor:pointer; transition:background .15s; display:flex; align-items:center; gap:.5rem; " <>
@@ -1092,9 +1054,9 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                     <% else %>
                       Classify with GS1 Kenya AI →
                     <% end %>
-                  </button>
-                </div>
+                </button>
               </div>
+            </div>
 
               <%!-- ── Analysis progress modal ────────────────────────────────── --%>
               <%= if @processing do %>
@@ -1109,15 +1071,15 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                     <%!-- Header --%>
                     <div style="display:flex; align-items:center; gap:.75rem; margin-bottom:1.75rem;">
                       <img src="/images/gs1.png" class="h-12  object-cover" />
-                      <div>
+            <div>
                         <p style="font-size:.65rem; font-weight:800; letter-spacing:.12em; color:var(--gs1-blue); margin:0;">
                           GS1 KENYA AI PRODUCT CLASSIFIER
                         </p>
                         <p style="font-size:.68rem; color:var(--gs1-gray-400); margin:0;">
                           Analysing with Artificial Intelligence…
                         </p>
-                      </div>
                     </div>
+                  </div>
 
                     <%!-- Stat row --%>
                     <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:.75rem; margin-bottom:1.5rem;">
@@ -1144,8 +1106,8 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                         <p style="font-size:.6rem; color:var(--gs1-gray-400); margin:.15rem 0 0; text-transform:uppercase; letter-spacing:.06em;">
                           Total
                         </p>
-                      </div>
-                    </div>
+                </div>
+              </div>
 
                     <%!-- Progress bar --%>
                     <div style="margin-bottom:.4rem; display:flex; justify-content:space-between; align-items:baseline;">
@@ -1223,10 +1185,10 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                         <%= for label <- ["Code","Name","Description","Weight","UOM","Class.","Market",""] do %>
                           <th style="padding:.6rem .85rem; text-align:left; font-size:.68rem; font-weight:700; color:var(--gs1-gray-400); text-transform:uppercase; letter-spacing:.07em; white-space:nowrap;">
                             {label}
-                          </th>
+                      </th>
                         <% end %>
-                      </tr>
-                    </thead>
+                    </tr>
+                  </thead>
                     <tbody>
                       <%= for {p, idx} <- Enum.with_index(@reviewed_products) do %>
                         <% orig = Map.get(p, :original)
@@ -1241,7 +1203,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                             <%= for val <- [orig[:code], orig[:name], orig[:description], orig[:weight], orig[:uom], orig[:classification], orig[:target_market]] do %>
                               <td style="padding:.35rem .85rem; font-size:.7rem; color:var(--gs1-gray-400); font-family:monospace; max-width:14rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">
                                 {format_cell(val)}
-                              </td>
+                        </td>
                             <% end %>
                             <td></td>
                           </tr>
@@ -1262,18 +1224,19 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                         >
                           <%!-- Code --%>
                           <td style="padding:.4rem .6rem; vertical-align:top;">
-                            <input
-                              type="text"
-                              name={"#{idx}:code"}
-                              value={format_cell(p.code)}
-                              phx-change="update_reviewed_product"
-                              phx-debounce="300"
-                              phx-value-index={idx}
-                              phx-value-field="code"
-                              class="gs1-input"
-                              style={"width:7rem; font-size:.75rem; font-family:monospace; border-radius:6px; padding:.35rem .5rem; border:1px solid; " <>
-                                if(has_error, do: "border-color:#FFAAAA; background:#FFF5F5;", else: "border-color:var(--gs1-gray-200);")}
-                            />
+                            <form phx-change="update_reviewed_product" style="margin:0;">
+                              <input type="hidden" name="index" value={idx} />
+                              <input type="hidden" name="field" value="code" />
+                              <input
+                                type="text"
+                                name="code"
+                                value={format_cell(p.code)}
+                                phx-debounce="blur"
+                                class="gs1-input"
+                                style={"width:7rem; font-size:.75rem; font-family:monospace; border-radius:6px; padding:.35rem .5rem; border:1px solid; " <>
+                                  if(has_error, do: "border-color:#FFAAAA; background:#FFF5F5;", else: "border-color:var(--gs1-gray-200);")}
+                              />
+                            </form>
                             <%= if is_dup do %>
                               <p style="margin:.25rem 0 0; font-size:.65rem; color:var(--gs1-red); line-height:1.3;">
                                 Duplicate code
@@ -1284,55 +1247,58 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                                 {gtin_error}
                               </p>
                             <% end %>
-                          </td>
+                        </td>
                           <%!-- Name --%>
                           <td style="padding:.4rem .6rem;">
-                            <input
-                              type="text"
-                              name={"#{idx}:name"}
-                              value={p.name}
-                              phx-change="update_reviewed_product"
-                              phx-debounce="300"
-                              phx-value-index={idx}
-                              phx-value-field="name"
-                              class="gs1-input"
-                              style="min-width:8rem; font-size:.75rem; border-radius:6px; padding:.35rem .5rem; border:1px solid var(--gs1-gray-200);"
-                            />
+                            <form phx-change="update_reviewed_product" style="margin:0;">
+                              <input type="hidden" name="index" value={idx} />
+                              <input type="hidden" name="field" value="name" />
+                              <input
+                                type="text"
+                                name="name"
+                                value={p.name}
+                                phx-debounce="blur"
+                                class="gs1-input"
+                                style="min-width:8rem; font-size:.75rem; border-radius:6px; padding:.35rem .5rem; border:1px solid var(--gs1-gray-200);"
+                              />
+                            </form>
                           </td>
                           <%!-- Description --%>
                           <td style="padding:.4rem .6rem; vertical-align:top;">
-                            <textarea
-                              name={"#{idx}:description"}
-                              phx-change="update_reviewed_product"
-                              phx-debounce="300"
-                              phx-value-index={idx}
-                              phx-value-field="description"
-                              rows="2"
-                              class="gs1-input"
-                              style="min-width:14rem; width:100%; font-size:.75rem; border-radius:6px; padding:.35rem .5rem; border:1px solid var(--gs1-gray-200); resize:vertical; line-height:1.45;"
-                            >{p.description}</textarea>
+                            <form phx-change="update_reviewed_product" style="margin:0;">
+                              <input type="hidden" name="index" value={idx} />
+                              <input type="hidden" name="field" value="description" />
+                              <textarea
+                                name="description"
+                                phx-debounce="blur"
+                                rows="2"
+                                class="gs1-input"
+                                style="min-width:14rem; width:100%; font-size:.75rem; border-radius:6px; padding:.35rem .5rem; border:1px solid var(--gs1-gray-200); resize:vertical; line-height:1.45;"
+                              >{p.description}</textarea>
+                            </form>
                           </td>
                           <%!-- Weight --%>
                           <td style="padding:.4rem .6rem;">
-                            <input
-                              type="text"
-                              name={"#{idx}:weight"}
-                              value={format_cell(p.weight)}
-                              phx-change="update_reviewed_product"
-                              phx-debounce="300"
-                              phx-value-index={idx}
-                              phx-value-field="weight"
-                              class="gs1-input"
-                              style="width:4rem; font-size:.75rem; border-radius:6px; padding:.35rem .5rem; border:1px solid var(--gs1-gray-200);"
-                            />
+                            <form phx-change="update_reviewed_product" style="margin:0;">
+                              <input type="hidden" name="index" value={idx} />
+                              <input type="hidden" name="field" value="weight" />
+                              <input
+                                type="text"
+                                name="weight"
+                                value={format_cell(p.weight)}
+                                phx-debounce="blur"
+                                class="gs1-input"
+                                style="width:4rem; font-size:.75rem; border-radius:6px; padding:.35rem .5rem; border:1px solid var(--gs1-gray-200);"
+                              />
+                            </form>
                           </td>
                           <%!-- UOM --%>
                           <td style="padding:.4rem .6rem;">
+                            <form phx-change="update_reviewed_product" style="margin:0;">
+                              <input type="hidden" name="index" value={idx} />
+                              <input type="hidden" name="field" value="uom" />
                             <select
-                              name={"#{idx}:uom"}
-                              phx-change="update_reviewed_product"
-                              phx-value-index={idx}
-                              phx-value-field="uom"
+                              name="uom"
                               class="gs1-input"
                               style="width:5.5rem; font-size:.75rem; border-radius:6px; padding:.35rem .5rem; border:1px solid var(--gs1-gray-200); background:#fff; cursor:pointer;"
                             >
@@ -1362,21 +1328,23 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                               <option value="VLT" selected={p.uom == "VLT"}>VLT</option>
                               <option value="KVT" selected={p.uom == "KVT"}>KVT</option>
                             </select>
+                            </form>
                           </td>
                           <%!-- Classification --%>
                           <td style="padding:.4rem .6rem; vertical-align:top; position:relative;">
                             <div style="display:flex; align-items:center; gap:.5rem;">
-                              <input
-                                type="text"
-                                name={"#{idx}:classification"}
-                                value={format_cell(p.classification)}
-                                phx-change="update_reviewed_product"
-                                phx-debounce="300"
-                                phx-value-index={idx}
-                                phx-value-field="classification"
-                                class="gs1-input"
-                                style="width:5.5rem; font-size:.75rem; font-family:monospace; border-radius:6px; padding:.35rem .5rem; border:1px solid var(--gs1-gray-200);"
-                              />
+                              <form phx-change="update_reviewed_product" style="margin:0;">
+                                <input type="hidden" name="index" value={idx} />
+                                <input type="hidden" name="field" value="classification" />
+                                <input
+                                  type="text"
+                                  name="classification"
+                                  value={format_cell(p.classification)}
+                                  phx-debounce="blur"
+                                  class="gs1-input"
+                                  style="width:5.5rem; font-size:.75rem; font-family:monospace; border-radius:6px; padding:.35rem .5rem; border:1px solid var(--gs1-gray-200);"
+                                />
+                              </form>
                               <button
                                 type="button"
                                 phx-click="suggest_similar_classes"
@@ -1417,7 +1385,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                                 <div style="display:flex; align-items:center; justify-content:space-between; padding:.5rem .75rem; border-bottom:1px solid var(--gs1-gray-100); background:var(--gs1-gray-50);">
                                   <span style="font-size:.65rem; font-weight:700; color:var(--gs1-gray-400); text-transform:uppercase; letter-spacing:.1em;">
                                     Choose a class
-                                  </span>
+                          </span>
                                   <button
                                     type="button"
                                     phx-click="clear_similar_suggestions"
@@ -1486,17 +1454,18 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                           </td>
                           <%!-- Target Market --%>
                           <td style="padding:.4rem .6rem;">
-                            <input
-                              type="text"
-                              name={"#{idx}:target_market"}
-                              value={p.target_market}
-                              phx-change="update_reviewed_product"
-                              phx-debounce="300"
-                              phx-value-index={idx}
-                              phx-value-field="target_market"
-                              class="gs1-input"
-                              style="width:3.5rem; font-size:.75rem; border-radius:6px; padding:.35rem .5rem; border:1px solid var(--gs1-gray-200);"
-                            />
+                            <form phx-change="update_reviewed_product" style="margin:0;">
+                              <input type="hidden" name="index" value={idx} />
+                              <input type="hidden" name="field" value="target_market" />
+                              <input
+                                type="text"
+                                name="target_market"
+                                value={p.target_market}
+                                phx-debounce="blur"
+                                class="gs1-input"
+                                style="width:3.5rem; font-size:.75rem; border-radius:6px; padding:.35rem .5rem; border:1px solid var(--gs1-gray-200);"
+                              />
+                            </form>
                           </td>
                           <%!-- Delete --%>
                           <td style="padding:.4rem .6rem;">
@@ -1519,12 +1488,12 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                             colspan="8"
                             style="padding:0; height:1px; background:var(--gs1-gray-100);"
                           >
-                          </td>
-                        </tr>
-                      <% end %>
-                    </tbody>
-                  </table>
-                </div>
+                        </td>
+                      </tr>
+                    <% end %>
+                  </tbody>
+                </table>
+              </div>
 
                 <%!-- Table footer --%>
                 <div style="padding:.85rem 1.4rem; border-top:1px solid var(--gs1-gray-100); background:var(--gs1-gray-50); display:flex; align-items:center; justify-content:space-between; border-radius:0 0 16px 16px;">
@@ -1532,13 +1501,13 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                     {length(@reviewed_products)} rows — edit any cell and click away to save
                   </p>
                   <div style="display:flex; gap:.5rem;">
-                    <button
-                      phx-click="reset"
+                <button
+                  phx-click="reset"
                       style="padding:.45rem .9rem; border:1px solid var(--gs1-gray-200); background:#fff; border-radius:7px; font-size:.75rem; font-weight:600; color:var(--gs1-gray-700); cursor:pointer;"
-                    >
-                      Start Over
-                    </button>
-                    <button
+                >
+                  Start Over
+                </button>
+                <button
                       phx-click="export_csv"
                       style="padding:.45rem 1.1rem; border:none; background:var(--gs1-blue); color:#fff; border-radius:7px; font-size:.75rem; font-weight:700; cursor:pointer; display:flex; align-items:center; gap:.4rem;"
                     >
@@ -1557,11 +1526,11 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                         />
                       </svg>
                       Save as CSV
-                    </button>
-                  </div>
-                </div>
+                </button>
               </div>
             </div>
+                </div>
+                  </div>
 
             <%!-- ════════════════════════════════════════════════════════════════
                STEP: CLASSIFIED (legacy results view)
@@ -1572,7 +1541,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                 <h3 style="font-size:.9rem; font-weight:700; color:var(--gs1-blue); margin:0;">
                   Classification Results
                 </h3>
-              </div>
+                </div>
               <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:.75rem; padding:1.1rem 1.4rem;">
                 <%= for {label, value, bg, fg, border} <- [
                   {"Total",         length(@classified_products), "#F7F8FA", "var(--gs1-gray-900)", "var(--gs1-gray-200)"},
@@ -1588,7 +1557,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                     </p>
                   </div>
                 <% end %>
-              </div>
+                </div>
               <div style="overflow-x:auto; border-top:1px solid var(--gs1-gray-100);">
                 <table style="width:100%; border-collapse:collapse;">
                   <thead>
@@ -1596,7 +1565,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                       <%= for label <- ["Product","Brick","Classification","Confidence",""] do %>
                         <th style="padding:.6rem 1rem; text-align:left; font-size:.68rem; font-weight:700; color:var(--gs1-gray-400); text-transform:uppercase; letter-spacing:.07em;">
                           {label}
-                        </th>
+                      </th>
                       <% end %>
                     </tr>
                   </thead>
@@ -1613,7 +1582,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                             {format_cell(orig[:code])} · {format_cell(orig[:name])} · {format_cell(
                               orig[:description]
                             )}
-                          </td>
+                        </td>
                         </tr>
                       <% end %>
                       <tr style="border-bottom:1px solid var(--gs1-gray-100);">
