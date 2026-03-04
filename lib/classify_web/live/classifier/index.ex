@@ -479,11 +479,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
         updated =
           List.update_at(socket.assigns.reviewed_products, index, fn p ->
             value_parsed = parse_reviewed_value(key, value)
-            p = Map.put(p, key, value_parsed)
-
-            if key == :description,
-              do: Map.put(p, :description, sentence_case(p.description || "")),
-              else: p
+            Map.put(p, key, value_parsed)
           end)
 
         {:noreply,
@@ -519,7 +515,7 @@ defmodule ClassifyWeb.ClassifierLive.Index do
 
     if index_raw != nil and field_name != nil do
       key = String.to_existing_atom(field_name)
-      value = payload[field_name] || flatten_value(payload["value"])
+      value = payload[field_name] || payload["#{index_raw}:#{field_name}"] || flatten_value(payload["value"])
       index = parse_index(index_raw)
       if index != nil, do: {index, key, value || ""}, else: nil
     else
@@ -1270,7 +1266,8 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                               type="text"
                               name={"#{idx}:code"}
                               value={format_cell(p.code)}
-                              phx-blur="update_reviewed_product"
+                              phx-change="update_reviewed_product"
+                              phx-debounce="300"
                               phx-value-index={idx}
                               phx-value-field="code"
                               class="gs1-input"
@@ -1294,7 +1291,8 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                               type="text"
                               name={"#{idx}:name"}
                               value={p.name}
-                              phx-blur="update_reviewed_product"
+                              phx-change="update_reviewed_product"
+                              phx-debounce="300"
                               phx-value-index={idx}
                               phx-value-field="name"
                               class="gs1-input"
@@ -1305,7 +1303,8 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                           <td style="padding:.4rem .6rem; vertical-align:top;">
                             <textarea
                               name={"#{idx}:description"}
-                              phx-blur="update_reviewed_product"
+                              phx-change="update_reviewed_product"
+                              phx-debounce="300"
                               phx-value-index={idx}
                               phx-value-field="description"
                               rows="2"
@@ -1319,7 +1318,8 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                               type="text"
                               name={"#{idx}:weight"}
                               value={format_cell(p.weight)}
-                              phx-blur="update_reviewed_product"
+                              phx-change="update_reviewed_product"
+                              phx-debounce="300"
                               phx-value-index={idx}
                               phx-value-field="weight"
                               class="gs1-input"
@@ -1370,7 +1370,8 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                                 type="text"
                                 name={"#{idx}:classification"}
                                 value={format_cell(p.classification)}
-                                phx-blur="update_reviewed_product"
+                                phx-change="update_reviewed_product"
+                                phx-debounce="300"
                                 phx-value-index={idx}
                                 phx-value-field="classification"
                                 class="gs1-input"
@@ -1489,7 +1490,8 @@ defmodule ClassifyWeb.ClassifierLive.Index do
                               type="text"
                               name={"#{idx}:target_market"}
                               value={p.target_market}
-                              phx-blur="update_reviewed_product"
+                              phx-change="update_reviewed_product"
+                              phx-debounce="300"
                               phx-value-index={idx}
                               phx-value-field="target_market"
                               class="gs1-input"
